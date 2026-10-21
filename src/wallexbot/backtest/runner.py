@@ -510,7 +510,7 @@ def run_grid(history_dir: Path | str, out_dir: Path | str, *, symbols: Sequence[
     bench = benchmark_rows(split, bars, rules)
 
     # full engine reports of the top candidate (train and validation), through backtest.report
-    top_reports = {}
+    top_reports, top_full = {}, {}
     for name in ("train", "validation"):
         bars_seg, start_ts = segments[name]
         raw, view, eng = run_one(bars_seg, start_ts, rules, risk, top_strategy, top_exit, fee0, {})
@@ -523,8 +523,10 @@ def run_grid(history_dir: Path | str, out_dir: Path | str, *, symbols: Sequence[
                                        "exit_params": replace(ExitParams(), fee_rate=fee0),
                                        "risk": risk, "initial_equity": INITIAL_EQUITY},
                            split=name, limitations=_limitations(), repo_dir=Path(__file__).resolve().parent)
-        write_report(rep, out_dir, f"backtest_top_{name}")
+        top_full[name] = rep  # written below, after every git_sha lookup (so reports/ cannot make it "dirty")
         top_reports[name] = {"inputs_hash": rep["inputs_hash"], "result_hash": rep["result_hash"]}
+    for name, rep in top_full.items():
+        write_report(rep, out_dir, f"backtest_top_{name}")
 
     inputs = {"symbols": sorted(symbols), "split": split_summary(split),
               "bars_sha256": _bars_digest(bars), "rules": rules}
