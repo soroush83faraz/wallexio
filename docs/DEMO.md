@@ -1,6 +1,6 @@
 # Demo outline (about 5 minutes)
 
-Status: **partly runnable.** The full demo replays one **stored** decision lifecycle from the audit database, and that replay is planned. The scripted mock round trip (`wallexbot.pipeline.run_scripted_trade`) runs now. It does not place orders and needs no credentials. Items marked *works now* run on the current code. Items marked *PLANNED* do not exist yet, and their command names are placeholders until `cli.py` is written.
+Status: **partly runnable.** No CLI, bot loop, shadow broker or AI advisor exists, and no backtest has been run, so there are no backtest numbers to show. The full demo replays one **stored** decision lifecycle from the audit database, and that replay is planned. The scripted mock round trip (`wallexbot.pipeline.run_scripted_trade`) runs now. It does not place orders and needs no credentials. Items marked *works now* run on the current code. Items marked *PLANNED* do not exist yet, and their command names are placeholders until `cli.py` is written.
 
 ## Setup (before the demo)
 
@@ -24,7 +24,7 @@ Status: **partly runnable.** The full demo replays one **stored** decision lifec
 .venv/bin/pytest -q
 ```
 
-Expected on the code at this commit: 826 tests pass.
+Expected on the code at this commit: 1244 tests pass.
 
 ## Works now: scripted mock round trip
 
@@ -33,6 +33,18 @@ Expected on the code at this commit: 826 tests pass.
 ```
 
 Runs one BUY and one reduce-only SELL of BTCUSDT against `MockWallex`, with no network. It returns the entry and exit results, the realized P&L and the audit tables. It exited with status 0 when checked at this commit.
+
+## Works now: guardian demo (mock, no network)
+
+```bash
+.venv/bin/python -m wallexbot.guardian.main --db /tmp/guardian_demo.db --mode mock --ticks 3 --interval 1
+```
+
+Runs the guardian loop against an in-memory `MockWallex`; `--mode shadow` plans flattens without placing them. Any other mode is refused. Hard-breach flatten behaviour is shown by `.venv/bin/pytest -q tests/test_guardian_flatten.py`.
+
+## Works now: historical download (public GETs, needs network)
+
+`wallexbot.data.history.fetch_history` downloads 1m candles to `data/history/<SYMBOL>/` (resumable). There is no CLI for it. Do not make network calls during a live demo unless intended.
 
 ## Lines to say
 

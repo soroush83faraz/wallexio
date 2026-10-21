@@ -1,6 +1,6 @@
 # Configuration and environment
 
-Status: `config.py`, `config/default.yaml` and `exchange/auth.py` exist. The CLI (`cli.py`, including the `--arm-live` flag) and the `doctor` command are planned.
+Status: `config.py`, `config/default.yaml` and `exchange/auth.py` exist. `wallexbot.doctor` now exists as a module (`run_doctor`, GET-only; see below), but there is **no CLI** yet: `cli.py`, the `--arm-live` flag and a `doctor` command are not written.
 
 ## Environment variable names
 
@@ -8,9 +8,9 @@ Names only. Values never go in the repo. Local values belong in a git-ignored `.
 
 | Name | Used by | Status in this build |
 |---|---|---|
-| `WALLEX_API_KEY_READ` | Read-only Wallex key | Named in `exchange/auth.py` (`READ_KEY_ENV`) but not read by any runtime path yet. No credentials are used or requested. |
-| `WALLEX_API_KEY_TRADE` | Read + Trade Wallex key | **Read** by `assert_live_armed()` in `exchange/auth.py`, which `load_config()` calls when `mode: live`. Only presence and header-safe format are checked. No order can be sent yet (no private client). |
-| `WALLEX_SUB_ACCOUNT_CLIENT_ID` | Sub-account identifier | Named in `exchange/auth.py` (`SUB_ACCOUNT_ENV`) but not read by any runtime path yet. Use not specified in the plan. |
+| `WALLEX_API_KEY_READ` | Read-only Wallex key | Named in `exchange/auth.py` (`READ_KEY_ENV`). Used by `wallex_private.py` and `doctor.py` when a caller passes `load_secret(READ_KEY_ENV)`; no CLI or loop does so yet. No credentials are used by tests or the mock. |
+| `WALLEX_API_KEY_TRADE` | Read + Trade Wallex key | **Read** by `assert_live_armed()` in `exchange/auth.py`, which `load_config()` calls when `mode: live`. Presence and header-safe format are checked. `WallexBroker` (unverified) refuses to send or cancel unless built with this key and the token returned by `assert_live_armed()`; nothing builds one yet. |
+| `WALLEX_SUB_ACCOUNT_CLIENT_ID` | Sub-account identifier | Named in `exchange/auth.py` (`SUB_ACCOUNT_ENV`); optionally passed to the private client as a header. Not read by any loop yet. Use not specified in the plan. |
 | `WALLEX_ARM_LIVE` | Live arming | **Enforced** by `config.py` and `assert_live_armed()`: must equal `YES_I_UNDERSTAND` (exact match) when `mode: live`. |
 | `ANTHROPIC_API_KEY` | Optional AI advisor | Not read by any code yet. The advisor is off in the critical path by default. |
 
@@ -42,7 +42,7 @@ From `config/default.yaml`. Loaded by `load_config()`, which uses `os.environ` u
 | `fees.taker_rate` | `0.0035` | Placeholder, unverified. |
 | `fees.maker_rate` | `0.0035` | Placeholder, unverified. |
 
-Risk limits are explained in RISK.md. Strategy parameters are not in the config yet (see STRATEGY.md).
+Risk limits are explained in RISK.md. Strategy and exit parameters are **not** in the YAML: they are dataclass defaults in `strategy/config.py` (`MomentumParams`), `strategy/exits.py` (`ExitParams`) and `backtest/costs.py` (`CostModel`), all unvalidated placeholders (see STRATEGY.md). Guardian settings (`GuardianConfig`, `FlattenConfig`) are code defaults too (see RISK.md).
 
 ## Live arming conditions
 
@@ -52,15 +52,15 @@ Live trading needs **all** of the following:
 
 1. `mode: live` in the config file. The default is `mock`.
 2. `WALLEX_ARM_LIVE=YES_I_UNDERSTAND` in the environment. **Enforced now** by `config.py`; without it, loading fails with `ConfigError`.
-3. A `--arm-live` command-line flag. The code check is **implemented**: `load_config(..., cli_armed=True)` is required. The flag itself is **planned** (`cli.py`, not yet present), so today only tests and callers can pass `cli_armed=True`.
+3. A `--arm-live` command-line flag. The code check is **implemented**: `load_config(..., cli_armed=True)` is required. The flag itself does not exist (no `cli.py`), so today only tests and callers can pass `cli_armed=True`.
 4. `WALLEX_API_KEY_TRADE` present. **Enforced now** by `assert_live_armed()` (presence and format only).
-5. `doctor` reporting green. **Planned.**
+5. `doctor` reporting green. The check code exists (`wallexbot.doctor.run_doctor`, read key only, never arms anything); **no command runs it yet**, and it has not been run against Wallex.
 6. Explicit go-ahead from the user, given in the conversation. This is a process rule, not code.
 
 Before arming, the evidence in BACKTEST.md must also be complete: backtest, single test-set evaluation, and a 24–48 hour shadow run.
 
 Notes:
 
-- `mode: shadow` is accepted by the config loader and does not require `WALLEX_ARM_LIVE`. Shadow mode sends no orders (planned `ShadowBroker`).
+- `mode: shadow` is accepted by the config loader and does not require `WALLEX_ARM_LIVE`. Shadow mode sends no orders (`ShadowBroker` is **not implemented**; the guardian demo's `--mode shadow` only uses a dry-run flag on a mock).
 - `mode: mock` is the default and uses no network writes.
 - Changing `mode` in the YAML file is not sufficient for live trading. The environment check still applies.

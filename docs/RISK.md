@@ -1,6 +1,6 @@
 # Risk
 
-Status: limits are defined in `config/default.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian and the hard-breach flatten procedure are planned and not yet present.
+Status: limits are defined in `config/default.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian (`guardian/monitor.py`, `flatten.py`, `main.py`) and the hard-breach flatten procedure are implemented and tested against `MockWallex` only (`tests/test_guardian_*.py`). They have never run against the real exchange. There is no bot loop yet, so nothing feeds the strategy heartbeat in a real deployment.
 
 ## Limits
 
@@ -58,18 +58,34 @@ Exit orders are reduce-only. They skip entry limits, the kill switch and loss br
 - In code, a soft breach adds a reason to the `loss_limits` check, so new entries are rejected while it holds. Reduce-only exits are not affected.
 - The plan does not specify any further action (for example size reduction). It must be defined before Day 2.
 
-## Hard breach and flatten procedure
+## Guardian (`guardian/`)
 
-Hard thresholds: daily loss 6%, drawdown 12%. The plan requires the guardian to flatten on a hard breach. The steps below follow from the rules in this document. They are **planned, not implemented**, and the exact sequence must be confirmed in code. The engine already flags a hard breach (`hard` in the breach result), but no guardian reads it yet.
+A separate process with its own `Store` connection, its own `KillSwitch`/`RiskEngine`/`OMS` around the injected broker. It imports nothing from `strategy`, `backtest` or `ai` (`tests/test_guardian_isolation.py`). The exchange is the source of truth: equity is quote balance plus base holdings marked at the bid. Run exactly one guardian per database. Demo entry point (mock/shadow only, no network): `python -m wallexbot.guardian.main --db PATH --mode mock|shadow [--ticks N] [--interval S]`.
 
-1. The guardian reads the audit store and detects the hard breach.
-2. It engages the kill switch by appending a new row. New entries are blocked from this point.
-3. Open entry orders are cancelled. Cancellation behaviour on Wallex is unverified.
-4. For each open position, the guardian submits a reduce-only exit through the OMS. The kill switch does not block it.
-5. Each exit is reconciled by client id. Any intent in `unknown_pending` is reconciled before the position is treated as flat.
-6. The kill switch stays engaged after the flatten. How it is cleared, and by whom, is not specified in the plan. Proposed: manual action only.
+Each tick (`GuardianConfig` defaults) the guardian reconciles the OMS, reads balances, open orders and quotes, then checks:
 
-Market-order exits may be rejected by the market-order guard (in the mock, a market order larger than 2% of the book or larger than the book is cancelled). Live behaviour is unverified.
+| Condition | Action |
+|---|---|
+| Soft breach (daily loss 4%, drawdown 8%) | Engage kill switch (entries off) |
+| Hard breach (daily loss 6%, drawdown 12%) | Flatten everything |
+| Exchange base balance differs from the OMS ledger by more than max(1 amount step, 0.1% of ledger) on 2 consecutive ticks | Kill switch + `needs_review`; exchange wins, nothing in the ledger is "fixed" |
+| No fresh quote for more than `max_data_age_s` (30 s) | Kill switch |
+| No fresh quote for more than 120 s | `stale_action`: `hold` (default) or `flatten` |
+| Strategy heartbeat older than 60 s | Kill switch |
+| Error while evaluating breaches | Kill switch (fail closed) |
+
+A failed tick is logged and the loop continues; 3 consecutive failed ticks engage the kill switch (`max_consecutive_failures`). Every decision is appended to the `audit_events` table with `actor='guardian'`. **The guardian only ever engages the kill switch; clearing it is a manual operator action.** Nothing else in the code engages it automatically.
+
+## Hard breach and flatten procedure (`guardian/flatten.py`, `FlattenConfig` defaults)
+
+1. Engage the kill switch.
+2. Cancel entry orders only (open BUYs) and verify with `open_orders()`; sync the ledger with `oms.reconcile()`. Protective stops and other resting SELLs for the symbol are cancelled first (`cancel_protective_stops=True`) because Wallex stop-order balance locking is unverified.
+3. Per position, place reduce-only SELL exits **through `OMS.submit`** (the reviewed entry in the AST allow-list is `_Flattener._place_exit`). Hard breach goes straight to MARKET; otherwise LIMIT at bid minus 20 bps, escalating to MARKET after a LIMIT timeout (10 s) or failure; a MARKET still open after 5 s is cancelled. Each child order is at most 50% of the reachable visible bid depth (MARKET: within 2% of the best bid, matching Wallex's auto-cancel). Sizes come from confirmed exchange balances, capped by the ledger.
+4. Poll until flat, or give up after 3 failed exits per symbol and record `needs_review` plus an alert row in `errors` (source `guardian.alert`).
+
+Safeguards: no resubmission (a new exit is placed only when every earlier SELL intent for the symbol is terminal; `unknown_pending` is waited out via reconcile); deterministic ids (`gflat:<UTC day>-<cause>:<symbol>:<n>`), so a re-run cannot send the same client id twice; bounded orders (20 per symbol), waits and loop iterations. `dry_run` (shadow mode) plans and audits without broker writes.
+
+Unverified: Wallex cancellation behaviour, market-order behaviour in thin books, and stop-order balance locking. All are exercised only against the mock.
 
 ## Failure behaviour
 

@@ -1,6 +1,8 @@
 # Backtest
 
-Status: **planned (Day 2). No backtest has been run, and no results are reported.** The backtest engine (`backtest/`) does not exist yet (the package is empty).
+Status: **the engine, cost model, metrics, splits, sensitivity and report writer are implemented and unit-tested. No backtest has been run on real data, and no results are reported.** There is no runner script or CLI yet; a run would be driven from Python. Nothing here supports a claim of profitability.
+
+Modules (`backtest/`): `engine.py` (bar-by-bar simulator), `costs.py`, `metrics.py`, `splits.py`, `sensitivity.py`, `report.py`.
 
 ## Data
 
@@ -10,21 +12,29 @@ Status: **planned (Day 2). No backtest has been run, and no results are reported
 - Quality checks (`data/quality.py`): 24/7 time grid, explicit zero-volume policy.
 - Depth and trade data come from the recorder (`data/recorder.py`), which samples every 15 s by default (`interval_s`) into daily-rotating files. Recorder history only exists from the time recording started, so cost estimates based on it cover a shorter period than candle data.
 
-## Engine assumptions
+## Historical downloader (`data/history.py`)
+
+`fetch_history(client, symbol, start_ts, end_ts, out_dir)` downloads closed 1m candles with public GETs only, walking backwards in 600-bar chunks (one request each) with a request budget (default 1500), retries and an abort after repeated failures. It is resumable: `state.json` records the bar ranges the API has already answered, so re-runs fetch only the rest and do not re-request true exchange gaps or the pre-listing region. `load_history(...)` reads the files back.
+
+Layout under the output directory (the repo uses `data/history/`, git-ignored via `/data/`): `<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv` (one file per UTC month, with a `.sha256` sidecar) plus `<SYMBOL>/state.json`. There is no CLI for the downloader yet. The 600-bar chunk is the client's `MAX_BARS_PER_REQUEST`; the "about 1500 bars" cap noted above is the observed server limit, not what the downloader uses.
+
+## Engine assumptions (as implemented in `engine.py` and `costs.py`)
 
 These are design choices, not measured facts:
 
-- Fractional quantities, rounded down to exchange precision.
-- Fees are percentage-based and charged in the fee asset.
-- Spread and an impact term are applied to fills.
-- Entries fill at the **next bar's open**.
-- Stops are gap-aware: a gap through the stop fills at the gap price, not at the stop.
-- Partial take-profit and a time stop are supported.
-- Fee rate `0.0035` is a placeholder and unverified.
+- Decimal arithmetic for money and quantity; floats only in `metrics.py`. Quantities rounded down to precision.
+- Signals are evaluated on a closed bar and fill at the **next bar's open**; entry caps (positions, exposure, soft/hard breach, cooldown) are checked at fill time, best score first.
+- Every fill is a taker fill: reference price moved by a half-spread (7.5 bps default) plus a linear impact term (`impact_k` 0.2 x order notional / previous bar's notional, capped at 50 bps). Fee is charged in quote at `taker_rate` 0.0035 (placeholder, unverified; Wallex may charge the received asset).
+- Stops are gap-aware: a gap through the stop fills at the open. If one bar touches both stop and target, the stop is assumed first.
+- Partial take-profit, an engine time stop and a daily-loss/drawdown breach (flatten at the next open, halt entries for the UTC day) are simulated, using the `RiskConfig` percentages.
+- Positions open at the end of the data are sold at the last close with full costs and flagged `end_of_data`. Equity is marked at closes; loss limits are checked at closes only.
+- Runs are deterministic and carry an `inputs_hash` and `result_hash`.
 
 ## Splits and the test set
 
-- The data is divided into **train**, **validation** and **test** periods. The plan does not give the boundaries or ratios. They must be fixed and committed to the repo **before** any run. Changing them after results are seen invalidates the split.
+- `chronological_split` lays out `[train][embargo][validation][embargo][test]` on the bar timestamps. Defaults in code: 60% train, 20% validation, remainder test, with an embargo of at least the longest indicator lookback. These fractions are code defaults, not a committed decision: the actual boundaries must be fixed and committed **before** any run. Changing them after results are seen invalidates the split. `walk_forward` windows also exist.
+- `TestSetGuard` enforces the single-use rule with an append-only JSON-lines ledger: a second `consume()` of the same test-set id raises, across processes.
+- `sensitivity.py` perturbs each numeric parameter by +/-pct and reports the fraction of neighbours with the same sign of expectancy; it refuses any split except train and validation.
 - Grid runs (S0/S1 × E1–E4) use train and validation only. Variant choice is made on validation.
 - The **test set is used once**. After the variant and the code are frozen, it is evaluated a single time and the result is recorded.
 - Re-running on the test set after any change to code, parameters, or variant is not valid evidence. A new, untouched period is required for that.
@@ -36,8 +46,8 @@ All of the following are required. The plan does not give numeric pass threshold
 
 1. Backtest on train and validation completed with frozen code and config.
 2. Single test-set evaluation completed and recorded, with thresholds fixed in advance.
-3. Shadow run of 24–48 hours using `ShadowBroker`, which logs decisions and sends no orders (planned).
-4. `doctor --read-only` green (planned).
+3. Shadow run of 24–48 hours using `ShadowBroker`, which logs decisions and sends no orders (**not implemented**).
+4. Doctor green (`wallexbot.doctor.run_doctor` exists; no CLI yet).
 5. Explicit go-ahead from the user.
 6. Credentials and arming conditions met (see CONFIG_ENV.md).
 
@@ -45,7 +55,7 @@ A passing backtest alone is not evidence for live trading.
 
 ## Limitations
 
-- No results exist. Nothing in this repo supports a claim of profitability.
+- No results exist. Nothing in this repo supports a claim of profitability. The report writer (`report.py`) recomputes every metric itself and renders missing values as `n/a`, but it has only run on synthetic test data.
 - Fees, spreads, and minimum notional are placeholders or unverified.
 - Candle volume is in base units; only relative volume is used.
 - Fill and impact models are approximations. Real fills may differ, especially for market orders in thin books.

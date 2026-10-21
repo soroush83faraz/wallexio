@@ -1,6 +1,17 @@
 # Architecture
 
-Status: Day-1 mock vertical slice. Implemented: `exchange/` (wallex_public, mock_wallex, ratelimit, auth), `data/`, `store.py`, `risk/`, `oms.py`, `redact.py`, `config.py`, `types.py`, `pipeline.py`. Not yet written: `strategy/`, `guardian/`, `backtest/` and `ai/` (empty packages), `cli.py`, `bot/`, and the shadow and private broker clients. Modules marked *planned* do not exist yet.
+Status: mock vertical slice plus strategy, backtest, guardian, history downloader and an unverified private client. All of it is tested against the mock or synthetic data only.
+
+Implemented modules (under `src/wallexbot/`):
+
+- `exchange/`: `wallex_public` (GET only), `wallex_private` (`WallexBroker`, `WallexAccountReader`; unverified, needs arming), `mock_wallex` (incl. `depth()`), `ratelimit`, `auth` (host pin, arming checks, `is_live_armed_token`), `base` (Broker protocol).
+- `data/`: `candles`, `aggregate`, `quality`, `recorder`, `history` (resumable 1m downloader, writes `data/history/`).
+- `strategy/`: `contract`, `indicators`, `features`, `config`, `momentum` (S1), `trend_baseline` (S0), `cooldown`, `sizing`, `exits` (E1-E4), `lookahead`.
+- `backtest/`: `engine`, `costs`, `metrics`, `splits`, `sensitivity`, `report`.
+- `guardian/`: `monitor`, `flatten`, `main` (demo CLI, mock/shadow only).
+- `risk/` (`engine`, `killswitch`), `oms.py`, `store.py` (incl. `audit_events` table and heartbeat), `pipeline.py` (scripted mock round trip, `build_mock_broker`), `doctor.py` (read-only preflight; no CLI), `config.py`, `types.py`, `redact.py`.
+
+**Not implemented**: `cli.py`, the bot loop (`bot/`), `ShadowBroker`, the AI advisor (`ai/` is an empty package). Items marked *planned* in the diagram do not exist.
 
 ## Module diagram
 
@@ -17,9 +28,8 @@ Status: Day-1 mock vertical slice. Implemented: `exchange/` (wallex_public, mock
                       |                 | strategy/        |
                       |                 |  indicators,     |
                       |                 |  features,       |
-                      |                 |  momentum,       |
-                      |                 |  regime,         |
-                      |                 |  costgate, exits |
+                      |                 |  momentum, S0,   |
+                      |                 |  sizing, exits   |
                       |                 +--------+---------+
                       |                          | OrderIntent
                       |                          v
@@ -40,14 +50,15 @@ Status: Day-1 mock vertical slice. Implemented: `exchange/` (wallex_public, mock
                                                  ^
                                                  | reads / writes
                        +-------------------------+-----------------+
-                       | guardian/ (separate process, planned)     |
+                       | guardian/ (separate process, implemented)  |
                        |  watches P&L, drawdown, daily loss;       |
                        |  engages kill switch, flattens on hard    |
                        |  breach                                   |
                        +-------------------------------------------+
 
-   bot/main.py and cli.py (planned) wire the modules together.
-   backtest/ (planned) replays the same strategy and risk code on stored data.
+   bot/main.py and cli.py (planned, absent) wire the modules together.
+   backtest/ replays the strategy engines and exit policies on stored candles (it has its own
+   simulated fills and a RiskConfig-based loss check, not the OMS).
 ```
 
 Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, intent ids), `redact.py` (secret scrubbing of payload and free-text columns before they are written; identifier columns are validated instead, see Persistence).
@@ -59,7 +70,7 @@ Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, i
   - any `submit_order` attribute other than the single call `self.broker.submit_order(...)` in `OMS.submit` (so aliasing, such as `send = b.submit_order`, and passing the bound method are flagged too), and on `submit_order` as a bare name, import alias, keyword or parameter;
   - string constants containing `submit_order` or a fragment of it, and concatenations, f-strings and `%`/`format`/`join` builds whose literal pieces contain a fragment or fold to the name (docstrings are ignored);
   - `getattr`, `setattr`, `delattr`, `vars`, `eval`, `exec`, `compile`, `globals`, `locals`, `__import__`, `attrgetter`, `methodcaller`, `import_module`, `__getattribute__`, `__getattr__`, `__setattr__` and `__dict__`, and importing `operator`, `importlib`, `inspect` or `builtins`. Six reviewed uses are allow-listed by file, scope and count (`ALLOWED_DYNAMIC` in the test: two `getattr` in `store.py`; in `redact.py` one `object.__setattr__`, one `getattr` for numpy scalar types and two `vars` for logging records). Known misses (not flagged): bytes-built attribute names, `sys.modules[...]` access to `getattr`, `string.Formatter().get_field`, `marshal`/`pickle`/`code` execution and use of mock internals. Treat the guard as a tripwire against accidents, not as a defence against hostile code;
-  - outside `oms.py`, `pipeline.py` and `exchange/`: importing the broker modules (`exchange.mock_wallex`, `exchange.base`, the `exchange` package), referencing `MockWallex`, or calling a submit-like method (`*submit*`, `place_order`, `send_order`, `create_order`, ...).
+  - outside `oms.py`, `pipeline.py` and `exchange/`: importing the broker modules (`exchange.mock_wallex`, `exchange.base`, the `exchange` package), referencing `MockWallex`/`mock_wallex` or the live `WallexBroker`/`wallex_private` (read-only names such as `WallexAccountReader` stay importable, the doctor uses them), or calling a submit-like method (`*submit*`, `place_order`, `send_order`, `create_order`, ...). One reviewed exception (`ALLOWED_OMS_SUBMIT`): the guardian's `_Flattener._place_exit` in `guardian/flatten.py` may call `self.oms.submit(...)` exactly once, because flatten exits must go through the OMS.
   The test also runs the scanner over rogue snippets, one per bypass pattern, and asserts that each is flagged.
 - Every order, including reduce-only exits and guardian flattens, goes through the OMS state machine.
 - Intent ids are deterministic: uuid5 over a JSON array of signal, symbol, side, type, quantity, price, stop price and reduce-only flag. Numbers are keyed by value, not spelling (`0.01` and `0.010000` give the same id), so resubmitting the same intent, at any decimal scale, produces the same client id (`wb_` + 32 hex) and at most one broker order. Two exits that differ only in stop price are different intents.
@@ -67,9 +78,10 @@ Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, i
 
 ## Guardian as a separate process
 
-- The guardian runs as its own process (planned, Day 2/3), reading the audit store rather than trusting the trading process's memory.
-- It watches daily loss and drawdown against the limits in RISK.md.
-- On a hard breach it engages the kill switch and flattens open positions through the OMS.
+- The guardian (`guardian/`) is written to run as its own process with its own `Store` connection; it reads the exchange as the source of truth. No production launcher exists yet (only the mock/shadow demo `python -m wallexbot.guardian.main`).
+- It watches daily loss, drawdown, balance-vs-ledger mismatch, data staleness and the strategy heartbeat (RISK.md has the thresholds).
+- On a soft breach or health fault it engages the kill switch; on a hard breach it flattens open positions through `OMS.submit`. It never clears the kill switch.
+- It must not import `strategy`, `backtest` or `ai` (`tests/test_guardian_isolation.py`).
 - Separation means a crash or hang in the trading loop does not disable the guardian.
 
 ## AI boundary
@@ -90,4 +102,4 @@ Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, i
 - Decimal values are stored as TEXT, never as floats.
 - Payload and free-text columns (payloads, reasons, messages, kill-switch reason and actor) pass through `redact()` before every write. Identifier columns are **not** redacted, because redacting them would break idempotency and lookups. They are **validated** at the store boundary instead: `client_id` must match `^wb_[0-9a-f]{32}$`; signal id, symbol, broker event kind, error source, fee asset and day must match `^[A-Za-z0-9_.:-]{1,128}$` and pass `redact()` unchanged. Any other value raises `StoreError` and nothing is written.
 - Realized P&L of a closed round trip equals the exact quote cash flows, fees included. Ledger additions, subtractions and multiplications run in an exact decimal context that raises instead of rounding. The only rounded step is the pro-rata cost release on a partial sell, and the closing fill releases the exact remaining cost basis, so that rounding cancels (see `apply_fill` in `oms.py`).
-- The kill switch is the latest row of an append-only table. A read error is treated as **engaged**. Known limit: "latest" is the highest `id`, so a raw writer with file access could append a row with a huge `id` and `engaged=0` and make later re-engagements invisible. The database file must be protected like a credential; the guardian (planned) should also keep its own copy of the engaged state.
+- The kill switch is the latest row of an append-only table. A read error is treated as **engaged**. Known limit: "latest" is the highest `id`, so a raw writer with file access could append a row with a huge `id` and `engaged=0` and make later re-engagements invisible. The database file must be protected like a credential; the guardian does not yet keep its own copy of the engaged state.

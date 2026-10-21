@@ -1,62 +1,53 @@
 # Strategy: long-only momentum breakout (S1)
 
-Status: specification. Nothing here is implemented or backtested yet (Day 2 of the plan). Parameter values not listed below are not yet fixed in code or in `config/default.yaml`; they must be fixed before any backtest run.
+Status: **S1 entry engine, S0 baseline, sizing and exit policies E1-E4 are implemented and unit-tested. They have not been backtested.** Every numeric default below is a **placeholder**, to be chosen on train/validation data only (never the test set). No results are reported anywhere.
+
+Code: `strategy/{momentum,config,features,indicators,cooldown,trend_baseline,lookahead,sizing,exits,contract}.py`. Not implemented: S2 (S1 plus a trend filter), any ICT-based strategy, and the bot loop that would call the engines live.
 
 ## Scope
 
-- Spot, long only, USDT quote, top 10–15 markets by 24h volume (`universe.top_n: 12` in config).
-- Bar inputs are **closed** 15m and 1h bars. 15m and 4h are **aggregated from 1m** candles (4h is also derivable from 1h); Wallex has no native 15m or 4h series. The aggregator is cross-checked against the native 1h series (resolution `60`) by `tests/test_aggregate.py` (`test_1m_to_1h_matches_native_hourly_fixture`, on recorded fixtures). `data/aggregate.py` itself does not cross-check at runtime. The forming candle is always dropped.
-- The variant **S1** is the breakout strategy below. **S2** = S1 plus a trend filter; it is only a variant, and no ICT-based strategy is included unless the user supplies code.
-- **S0** is the baseline used for comparison. The source plan names it but does not define it; it must be defined before backtesting.
+- Spot, long only, USDT quote, top 10-15 markets by 24h volume (`universe.top_n: 12`).
+- Inputs are **closed** bars only. 15m and 4h are aggregated from 1m candles (Wallex has no native 15m/4h series; see WALLEX_INTEGRATION.md). The forming candle is dropped.
+- Engines are stateless and look-ahead-safe: they read `bars[-1]` and earlier. `strategy/lookahead.py` checks this by re-evaluating on a prefix whose future bars are replaced by wild values. Any error or non-finite value means abstain (`None`).
 
-## Entry rules (S1)
+## S1 entry rules (`MomentumSignalEngine`, params in `strategy/config.py::MomentumParams`)
 
-An entry signal requires all of the following on a closed bar:
+All must hold on the last closed bar; otherwise the engine abstains:
 
-1. **Donchian-20 breakout**: close breaks above the 20-bar Donchian high. Exact bar convention is to be pinned in code.
-2. **EMA50 trend filter**: trend side relative to EMA50, as implemented in code.
-3. **Rate of change (ROC) acceleration**: momentum is increasing. Threshold: not yet specified.
-4. **Volume confirmation**: relative volume ≥ 1.8× the median. Only relative volume is used. Candle volume is in base units (see WALLEX_INTEGRATION.md).
-5. **ATR band**: breakout distance is within an ATR-based band. Band width: not yet specified.
-6. **Not-late filter**: the price has not already run too far from the breakout level. Threshold: not yet specified.
-7. **Regime tightening**: entry criteria are stricter in an unfavourable regime. Regime definition: not yet specified.
-8. **Cost gate** (below) must pass.
-9. **Cooldown**: after a signal in a market, no new signal in that market for 8 bars.
+1. `breakout`: close > highest high of the prior `donchian_period` (20) bars.
+2. `trend`: close > EMA(`ema_period`=50, a **bar** count: 50 x 15m bars is about 12.5h, not 50 hourly bars; use 200 on 15m bars to match).
+3. `roc_accel`, `roc_positive`, `roc_z`: ROC(6) is rising, the prior ROC is positive, and the ROC z-score over 96 bars is >= 1.0.
+4. `volume`: volume / median of the prior 48 bars >= 1.8 (2.2 when the regime is unfavourable). Abstain if more than 20% of that window has zero volume.
+5. `atr_band`: ATR(14)/close in [0.002, 0.03] (placeholders).
+6. Not-late filters: close - breakout <= 1.0 ATR; RSI(14) <= 85; advance from the 24-bar low <= 5 ATR.
+7. Regime: favourable iff efficiency ratio(20) >= 0.3 AND EMA slope (4 bars) > 0. Otherwise the volume multiple (2.2) and cost multiple (4.0) are tightened.
+8. `cost_gate`: `expected_move_atr` (1.5) x ATR in bps >= `cost_mult` (3.0; 4.0 tightened) x round-trip cost bps. The round-trip cost comes from `MarketContext.round_trip_cost_bps`, supplied by the caller.
+9. `min_score`: a 0..1 score (weights: volume 0.25, roc_z 0.20, efficiency 0.20, cost 0.20, earliness 0.15; each component is 0.5 at its threshold) must be >= 0.6.
 
-If any condition fails, the strategy abstains. Abstention is a valid and expected outcome.
+Needs at least `min_bars` = 120 bars (the engine uses the last 300). The signal's stop is `stop_atr_mult` (1.5) ATR below the close. `diagnose()` returns every rule's observed value for the decision log. Abstention is a valid, expected outcome.
 
-## Cost gate
+**Cooldown** (`CooldownTracker`, kept by the caller): 8 bars after an exit, 2 after a profitable exit with the trend intact; after a stop-out, no re-entry on the same breakout level.
 
-An entry is taken only if the expected move is at least **3× the round-trip cost**.
+## S0 baseline (`TrendBaselineEngine`)
 
-- Round-trip cost includes both-side fees, the spread, and an impact/slippage allowance.
-- Fee rates in config are `taker_rate: 0.0035` and `maker_rate: 0.0035`. **Both are placeholders and unverified** (see WALLEX_INTEGRATION.md).
-- Spread is checked separately by the risk engine (`max_spread_bps: 15`).
-- The exact round-trip cost formula is not fixed yet.
+Benchmark only: close > SMA50, SMA20 > SMA50, close > prior 20-bar high; stop 2.5 ATR below. No volume, cost or regime logic, so it trades more often and is not comparable on selectivity. This is a definition chosen in code; the source plan names S0 but does not define it.
 
-## Position sizing
+## Position sizing (`strategy/sizing.py`)
 
-Risk-based sizing:
+`qty = equity x risk_pct / 100 / (entry - stop)`, with `risk_pct` = `risk.risk_per_trade_pct` (1.0), halved when score < 0.7. Clamped by max position (25% of equity), max order value, free cash minus a fee reserve, 1/`min_depth_multiple` of depth (only if a depth figure is given) and optional exposure headroom; rounded **down** to the amount precision. Result is 0 (with a reason) if the stop is not below entry, an input is invalid, or notional is below the larger of `rules.min_notional` and `risk.min_notional` (both unverified).
 
-```
-quantity = equity × risk_per_trade_pct / (entry − stop)
-```
+## Exits E1-E4 (`strategy/exits.py`, `ExitParams` defaults)
 
-- `risk_per_trade_pct` = 1% (config).
-- The result is clamped by: max position (25% of equity), max order value (1000 quote), available balance, exchange precision (rounded **down**, never up), and order-book depth.
-- The stop must be below entry for a long. A stop that is missing or not below entry means no trade.
+The hard stop (the signal's stop) applies to all. `on_bar` runs on each closed bar; its exit executes at the next open. Intrabar stops and targets are the caller's job (stop assumed first if one bar touches both).
 
-## Exits (E1–E4)
+- **E1 `FixedRR`**: full take-profit at entry + 1.5 R.
+- **E2 `ChandelierTrail`**: once the highest high >= entry + 1 R, trail the stop at highest high - 2 x ATR(14), ratcheting up only.
+- **E3 `MomentumFailure`**: exit at the next open after a close below EMA(9), or ROC(3) < 0, or two consecutive volume-dry bars (< 0.5 x prior 20-bar median).
+- **E4 `Hybrid`** (pre-registered leader): sell 50% at +1 R, then move the stop to breakeven plus fees and chandelier-trail the rest; E3 exit; false-breakout exit (close back below the breakout level within 2 bars); time stop at 16 bars unless the partial was taken. `fee_rate` 0.0035 is a placeholder.
 
-Exit variants are compared in backtests on the same entries:
-
-- **E1–E3**: exit variants whose exact rules are not specified in the source plan. They are to be written down before backtesting.
-- **E4**: a hybrid exit and the **pre-registered leader**. It is the variant expected to be evaluated on the test set.
-- The backtest engine supports partial take-profit, a time stop, and gap-aware stops (see BACKTEST.md).
-
-Exit orders are reduce-only. The kill switch does not block them (see RISK.md).
+Exit orders are reduce-only; the kill switch does not block them (RISK.md).
 
 ## What the strategy does not claim
 
-- No profitability, win rate, or expected return is claimed. No backtest has been run.
-- The strategy may produce zero trades in a period. That is correct behaviour when filters fail.
+- No profitability, win rate or expected return. No backtest has been run.
+- It may produce zero trades in a period; that is correct when filters fail.
