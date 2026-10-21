@@ -1,10 +1,12 @@
-"""Command line entry: `python -m wallexbot <demo|backtest|doctor|guardian>`.
+"""Command line entry: `python -m wallexbot <demo|backtest|doctor|guardian|bot>`.
 
     demo       scripted mock round trip (signal -> risk -> OMS -> MockWallex), pretty-printed
     backtest   exploratory grid on train+validation of local 1m history (see backtest/runner.py);
                `--final-test --params-file frozen.json` is the single-use test-set evaluation
     doctor     read-only account preflight; needs WALLEX_API_KEY_READ in the environment (exit 2 without it)
     guardian   guardian demo loop, mock/shadow only
+    bot        autonomous loop, mock (paper; offline with --replay-from) or shadow (live public book, simulated
+               fills); optional `--advisor off|shadow` (shadow = log-only AI verdicts, never applied)
 
 There is no live mode in this build: `--arm-live` is refused on every command.
 """
@@ -75,6 +77,29 @@ def _doctor(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _bot(argv: list[str]) -> int:
+    """`bot` passes everything to wallexbot.bot.main except --advisor, which is wired here (bot/ never imports ai/)."""
+    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    pre.add_argument("--advisor", choices=("off", "shadow"), default="off")
+    pre.add_argument("--db")
+    pre.add_argument("--mode")
+    ns, rest = pre.parse_known_args(argv)
+    if ns.mode == "live":
+        print(LIVE_REFUSAL, file=sys.stderr)
+        return 2
+    from wallexbot.bot.main import main as bot_main
+    forwarded = list(rest) + (["--db", ns.db] if ns.db else []) + (["--mode", ns.mode] if ns.mode else [])
+    if ns.db is None or ns.mode is None or ns.advisor == "off":
+        return bot_main(forwarded)          # missing options: the bot's own parser reports them
+    from wallexbot.advisor_bridge import build_advisor
+    bridge, recorder = build_advisor(ns.advisor, ns.db, warn=lambda m: print(f"warning: {m}", file=sys.stderr))
+    try:
+        return bot_main(forwarded, advisor=bridge, after_tick=recorder)
+    finally:
+        if recorder is not None:
+            recorder.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m wallexbot", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -101,6 +126,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("guardian", add_help=False,
                    help="guardian demo loop (mock/shadow only); all further arguments go to "
                         "`python -m wallexbot.guardian.main` (--db PATH --mode mock|shadow [--ticks N] ...)")
+    sub.add_parser("bot", add_help=False,
+                   help="autonomous loop, mock|shadow only (--db PATH --mode mock|shadow [--replay-from DIR] "
+                        "[--max-ticks N] [--balance USDT] [--advisor off|shadow]); live is refused")
     return p
 
 
@@ -112,6 +140,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if argv[:1] == ["guardian"]:  # its own parser owns the remaining options
         from wallexbot.guardian.main import main as guardian_main
         return guardian_main(argv[1:])
+    if argv[:1] == ["bot"]:
+        if any(a in ("-h", "--help") for a in argv[1:]):
+            print("python -m wallexbot bot ... [--advisor off|shadow]  (shadow: log-only AI verdicts; needs "
+                  "ANTHROPIC_API_KEY, else NullAdvisor)\nremaining options are those of python -m wallexbot.bot.main:")
+        return _bot(argv[1:])
     args = build_parser().parse_args(argv)
     if args.command == "backtest" and args.ledger is None:
         from wallexbot.backtest.runner import LEDGER_DEFAULT
