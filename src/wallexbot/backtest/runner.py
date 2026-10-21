@@ -365,6 +365,7 @@ def feasibility_for_symbol(symbol: str, bars: Sequence[Candle], ranges: Sequence
     markets = {label: CostModel(taker_rate=fee, maker_rate=fee).market_context() for label, fee, _ in fees}
     primary = fees[0][0]
     n = 0
+    in_ranges = 0
     atr_pcts: list[float] = []
     gate = {label: 0 for label in markets}
     gate_and_rest = {label: 0 for label in markets}
@@ -373,6 +374,7 @@ def feasibility_for_symbol(symbol: str, bars: Sequence[Candle], ranges: Sequence
     for i, c in enumerate(bars):
         if not any(a <= c.ts <= b for a, b in ranges):
             continue
+        in_ranges += 1
         d = engine.diagnose(symbol, bars[max(0, i + 1 - p.history_bars): i + 1], markets[primary])
         if d is None:
             continue
@@ -386,7 +388,7 @@ def feasibility_for_symbol(symbol: str, bars: Sequence[Candle], ranges: Sequence
             ok = cost_gate_passes(f, p, mk)
             gate[label] += ok
             gate_and_rest[label] += ok and others
-    return {"bars": n, "gate_pass": gate, "gate_and_all_other_rules_pass": gate_and_rest,
+    return {"bars_in_segments": in_ranges, "bars": n, "gate_pass": gate, "gate_and_all_other_rules_pass": gate_and_rest,
             "atr_band_ok": band_ok, "all_other_rules_pass_ignoring_cost_gate": rest_ok_primary,
             "atr_pct_median": statistics.median(atr_pcts) if atr_pcts else None,
             "atr_pct_p90": sorted(atr_pcts)[int(0.9 * (len(atr_pcts) - 1))] if atr_pcts else None,
@@ -609,7 +611,11 @@ def render_grid_markdown(r: Mapping[str, Any]) -> str:
         s = sp[name]
         note = " (RESERVED, not evaluated)" if name == "test" else ""
         L.append(f"  - {name}: {s['start']} .. {s['end_last_bar']} ({s['bars']} bars){note}")
-    L += ["", "Fee scenarios:"]
+    L += ["", "Reading notes: a max drawdown near 8% is the RiskConfig soft-drawdown limit (`drawdown_soft_pct` 8): "
+          "new entries are blocked after it, which is why many losing runs end at about -8%. Impact cost is "
+          "mostly at the model's 50 bps cap because the liquidity proxy (previous 15m bar notional) is small "
+          "next to 1000 USDT orders. Metrics exclude warm-up bars; 'bars' in the per-run reports counts the "
+          "scored segment, the header's bar count includes warm-up.", "", "Fee scenarios:"]
     L += [f"- `{f['label']}` taker {f['taker_rate']}: {f['note']}" for f in r["fee_scenarios"]]
     for split in ("train", "validation"):
         L += ["", f"## {split.capitalize()} results", "",
@@ -646,12 +652,15 @@ def render_grid_markdown(r: Mapping[str, Any]) -> str:
     L += [f"| {k} | {v['round_trip_cost_bps']:.0f} | {_pct(v['atr_pct_needed_favourable'])} | "
           f"{_pct(v['atr_pct_needed_tightened'])} |" for k, v in feas["required_atr_pct"].items()]
     labels = [f["label"] for f in r["fee_scenarios"]]
-    L += ["", "Fraction of bars where the cost gate passes:", "",
-          "| symbol | bars | median ATR% | p90 ATR% | " + " | ".join(labels) + " | other rules pass (no cost gate) |",
-          "|---|---|---|---|" + "---|" * len(labels) + "---|"]
+    L += ["", "Fraction of usable-feature bars where the cost gate passes (bars without usable features, e.g. too "
+          "many zero-volume bars or a zero median volume, make S1 abstain regardless):", "",
+          "| symbol | bars in train+val | usable-feature bars | median ATR% | p90 ATR% | max ATR% | "
+          + " | ".join(labels) + " | other rules pass (no cost gate) |",
+          "|---|---|---|---|---|---|" + "---|" * len(labels) + "---|"]
     for s, d in feas["per_symbol"].items():
         n = d["bars"] or 1
-        L.append(f"| {s} | {d['bars']} | {_pct(d['atr_pct_median'])} | {_pct(d['atr_pct_p90'])} | "
+        L.append(f"| {s} | {d['bars_in_segments']} | {d['bars']} | {_pct(d['atr_pct_median'])} | "
+                 f"{_pct(d['atr_pct_p90'])} | {_pct(d['atr_pct_max'])} | "
                  + " | ".join(f"{_pct(d['gate_pass'][k] / n)} ({d['gate_pass'][k]})" for k in labels)
                  + f" | {d['all_other_rules_pass_ignoring_cost_gate']} |")
     tc = r["top_candidate"]
