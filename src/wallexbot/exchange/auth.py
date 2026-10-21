@@ -12,12 +12,16 @@ whose path mentions "withdraw", so this bot cannot call a withdrawal endpoint ev
 Every request URL must pass assert_host_allowed(). Authenticated requests must go through
 safe_opener(): verified TLS, and a redirect is followed only if its target passes the same
 check, so the key header is never forwarded to another host (urllib re-sends it on redirect).
+
+is_live_armed_token(obj) is True only for the very object an assert_live_armed() call returned,
+so a consumer (WallexBroker) can demand proof of arming that an equal Secret does not forge.
 """
 from __future__ import annotations
 
 import os
 import re
 import ssl
+import threading
 import urllib.request
 from collections.abc import Mapping
 from urllib.parse import unquote, urlsplit
@@ -35,6 +39,10 @@ ARM_ENV, ARM_VALUE = "WALLEX_ARM_LIVE", "YES_I_UNDERSTAND"
 _ALLOWED_NETLOCS = (API_HOST, f"{API_HOST}:443")
 _URL_CHARS = re.compile(r"[\x21-\x7e]+")         # printable ASCII: no space/control/IDN tricks
 _HEADER_VALUE = re.compile(r"[\x21-\x7e]{1,512}")  # no CR/LF (header injection) or spaces
+# Every object assert_live_armed() has returned in this process, kept for identity checks only
+# (one entry per successful arming; the same key is already held by os.environ and redact).
+_ARMED_TOKENS: list[Secret] = []
+_ARMED_LOCK = threading.Lock()
 
 
 class AuthError(Exception):
@@ -126,4 +134,17 @@ def assert_live_armed(env: Mapping[str, str] | None, cli_flag: bool) -> Secret:
         missing.append(f"a valid {TRADE_KEY_ENV}")
     if missing:
         raise LiveNotArmed("live trading is not armed; missing: " + ", ".join(missing))
+    with _ARMED_LOCK:
+        _ARMED_TOKENS.append(key)
     return key
+
+
+def is_live_armed_token(token: object) -> bool:
+    """True only for the very object an assert_live_armed() call returned in this process.
+
+    Identity, not equality: a Secret with the same value made any other way (load_secret,
+    Secret(...)) is not evidence that the arming conditions held, so it cannot arm anything."""
+    if type(token) is not Secret:
+        return False
+    with _ARMED_LOCK:
+        return any(token is armed for armed in _ARMED_TOKENS)
