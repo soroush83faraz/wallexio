@@ -50,14 +50,19 @@ Status: Day-1 mock vertical slice. Implemented: `exchange/` (wallex_public, mock
    backtest/ (planned) replays the same strategy and risk code on stored data.
 ```
 
-Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, intent ids), `redact.py` (secret scrubbing before any write).
+Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, intent ids), `redact.py` (secret scrubbing of payload and free-text columns before they are written; identifier columns are validated instead, see Persistence).
 
 ## Single-order-path rule
 
 - Only `OMS.submit()` may call `broker.submit_order`.
-- Enforced by `tests/test_single_order_path_ast.py`, which parses the source with `ast` and fails if any other call site exists.
+- Guarded by `tests/test_single_order_path_ast.py`, a **lint-style** AST check over `src/wallexbot`, not a proof (Python is too dynamic for a static check to rule out every path). It fails on:
+  - any `submit_order` attribute other than the single call `self.broker.submit_order(...)` in `OMS.submit` (so aliasing, such as `send = b.submit_order`, and passing the bound method are flagged too), and on `submit_order` as a bare name, import alias, keyword or parameter;
+  - string constants containing `submit_order` or a fragment of it, and concatenations, f-strings and `%`/`format`/`join` builds whose literal pieces contain a fragment or fold to the name (docstrings are ignored);
+  - `getattr`, `setattr`, `delattr`, `vars`, `eval`, `exec`, `compile`, `globals`, `locals`, `__import__`, `attrgetter`, `methodcaller`, `import_module`, `__getattribute__`, `__getattr__`, `__setattr__` and `__dict__`, and importing `operator`, `importlib`, `inspect` or `builtins`. Three reviewed uses are allow-listed by file, scope and count (two `getattr` in `store.py`, one `object.__setattr__` in `redact.py`);
+  - outside `oms.py`, `pipeline.py` and `exchange/`: importing the broker modules (`exchange.mock_wallex`, `exchange.base`, the `exchange` package), referencing `MockWallex`, or calling a submit-like method (`*submit*`, `place_order`, `send_order`, `create_order`, ...).
+  The test also runs the scanner over rogue snippets, one per bypass pattern, and asserts that each is flagged.
 - Every order, including reduce-only exits and guardian flattens, goes through the OMS state machine.
-- Intent ids are deterministic (uuid5 over signal, symbol, side, type, quantity, price, reduce-only flag). Resubmitting the same intent produces the same client id.
+- Intent ids are deterministic: uuid5 over a JSON array of signal, symbol, side, type, quantity, price, stop price and reduce-only flag. Numbers are keyed by value, not spelling (`0.01` and `0.010000` give the same id), so resubmitting the same intent, at any decimal scale, produces the same client id (`wb_` + 32 hex) and at most one broker order. Two exits that differ only in stop price are different intents.
 - After a POST timeout the intent moves to `unknown_pending`. It is **never resubmitted**. It is reconciled by looking up the client id and open orders.
 
 ## Guardian as a separate process
@@ -77,7 +82,12 @@ Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, i
 
 ## Persistence
 
-- SQLite in WAL mode. Tables are append-only, enforced by triggers.
+- SQLite in WAL mode. Audit tables are append-only. Triggers stored in the schema (so they apply to every connection, including a plain `sqlite3` shell) enforce this:
+  - `UPDATE` and `DELETE` abort on every table. The one exception is `order_intents`, whose `state` and `updated_at` may change, and only along legal state transitions.
+  - An `INSERT` whose primary key, rowid or `UNIQUE` key already exists aborts *before* SQLite resolves the conflict. This means `INSERT OR REPLACE`, `REPLACE INTO` and upserts cannot rewrite or delete an existing row. Without this, `REPLACE` deletes the old row without firing `DELETE` triggers and could, for example, rewrite a kill-switch row. Explicit negative rowids are refused, and the `order_intents` rowid cannot be changed.
+  - The store's own connection also sets `PRAGMA recursive_triggers=ON` as a second layer.
+  - Not covered: appending new rows (that is how the log grows; disengaging the kill switch is a new, logged row), and anyone with raw write access to the file who drops the triggers.
 - Decimal values are stored as TEXT, never as floats.
-- Redaction runs before every write.
+- Payload and free-text columns (payloads, reasons, messages, kill-switch reason and actor) pass through `redact()` before every write. Identifier columns are **not** redacted, because redacting them would break idempotency and lookups. They are **validated** at the store boundary instead: `client_id` must match `^wb_[0-9a-f]{32}$`; signal id, symbol, broker event kind, error source, fee asset and day must match `^[A-Za-z0-9_.:-]{1,128}$` and pass `redact()` unchanged. Any other value raises `StoreError` and nothing is written.
+- Realized P&L of a closed round trip equals the exact quote cash flows, fees included. Ledger additions, subtractions and multiplications run in an exact decimal context that raises instead of rounding. The only rounded step is the pro-rata cost release on a partial sell, and the closing fill releases the exact remaining cost basis, so that rounding cancels (see `apply_fill` in `oms.py`).
 - The kill switch is the latest row of an append-only table. A read error is treated as **engaged**.
