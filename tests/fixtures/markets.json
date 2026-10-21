@@ -1,0 +1,772 @@
+{
+ "result": {
+  "markets": [
+   {
+    "symbol": "PEPETMN",
+    "base_asset": "PEPE",
+    "quote_asset": "TMN",
+    "fa_base_asset": "پپه",
+    "fa_quote_asset": "تومان",
+    "en_base_asset": "Pepe",
+    "en_quote_asset": "Toman",
+    "categories": [
+     4
+    ],
+    "price": "1.2323",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": true,
+    "is_usdt_based": false,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2023-05-24T00:00:00Z",
+    "amount_precision": 0,
+    "price_precision": 4,
+    "flags": [],
+    "is_market_type_enable": false,
+    "otc_min_notional": 90000,
+    "otc_max_notional": 200000000,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "1.2438515606437767819636",
+     "bid": "1.2438515606437767819636",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 3.42,
+    "volume_24h": 82692121522,
+    "change_7D": 13.51,
+    "quote_volume_24h": 99987090288.6132,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "1.2546",
+    "lowest_24h_price": "1.16"
+   },
+   {
+    "symbol": "BTCTMN",
+    "base_asset": "BTC",
+    "quote_asset": "TMN",
+    "fa_base_asset": "بیت کوین",
+    "fa_quote_asset": "تومان",
+    "en_base_asset": "Bitcoin",
+    "en_quote_asset": "Toman",
+    "categories": [
+     44
+    ],
+    "price": "22468463574",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": true,
+    "is_usdt_based": false,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2020-04-01T00:00:00Z",
+    "amount_precision": 8,
+    "price_precision": 0,
+    "flags": [],
+    "is_market_type_enable": true,
+    "otc_min_notional": 90000,
+    "otc_max_notional": 400000000,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "22595884804.3281723968312062784973",
+     "bid": "22595884804.3281723968312062784973",
+     "spot": {
+      "threshold": "4",
+      "max_acceptable_buy": "8",
+      "max_acceptable_sell": "8"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4",
+      "max_acceptable_buy": "8",
+      "max_acceptable_sell": "8"
+     },
+     "market_maker": {
+      "threshold": "5",
+      "max_acceptable_buy": "10",
+      "max_acceptable_sell": "10"
+     }
+    },
+    "change_24h": 4.24,
+    "volume_24h": 3.2167846,
+    "change_7D": 3.72,
+    "quote_volume_24h": 70447028564.47113,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "22535000000",
+    "lowest_24h_price": "21443548632"
+   },
+   {
+    "symbol": "ETHTMN",
+    "base_asset": "ETH",
+    "quote_asset": "TMN",
+    "fa_base_asset": "اتریوم",
+    "fa_quote_asset": "تومان",
+    "en_base_asset": "Ethereum",
+    "en_quote_asset": "Toman",
+    "categories": [
+     13,
+     16,
+     44,
+     53
+    ],
+    "price": "668300000",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": true,
+    "is_usdt_based": false,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2020-05-01T00:00:00Z",
+    "amount_precision": 5,
+    "price_precision": 0,
+    "flags": [],
+    "is_market_type_enable": true,
+    "otc_min_notional": 90000,
+    "otc_max_notional": 200000000,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "672247988.9559393347786713006044",
+     "bid": "672247988.9559393347786713006044",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 4.83,
+    "volume_24h": 56.20081665,
+    "change_7D": 3.48,
+    "quote_volume_24h": 36417968942.04599,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "668594817",
+    "lowest_24h_price": "631342582"
+   },
+   {
+    "symbol": "BTCUSDT",
+    "base_asset": "BTC",
+    "quote_asset": "USDT",
+    "fa_base_asset": "بیت کوین",
+    "fa_quote_asset": "تتر",
+    "en_base_asset": "Bitcoin",
+    "en_quote_asset": "Tether",
+    "categories": [
+     44
+    ],
+    "price": "84473.73",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": false,
+    "is_usdt_based": true,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2020-04-01T00:00:00Z",
+    "amount_precision": 8,
+    "price_precision": 2,
+    "flags": [],
+    "is_market_type_enable": true,
+    "otc_min_notional": 2,
+    "otc_max_notional": 2000,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "84653.29101187514607",
+     "bid": "84653.29101187514607",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 2.15,
+    "volume_24h": 6.06115817,
+    "change_7D": 3.22,
+    "quote_volume_24h": 505304.3932746406,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "84661.91",
+    "lowest_24h_price": "82405.53"
+   },
+   {
+    "symbol": "ETHUSDT",
+    "base_asset": "ETH",
+    "quote_asset": "USDT",
+    "fa_base_asset": "اتریوم",
+    "fa_quote_asset": "تتر",
+    "en_base_asset": "Ethereum",
+    "en_quote_asset": "Tether",
+    "categories": [
+     13,
+     16,
+     44,
+     53
+    ],
+    "price": "2513.01",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": false,
+    "is_usdt_based": true,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2020-05-01T00:00:00Z",
+    "amount_precision": 5,
+    "price_precision": 2,
+    "flags": [],
+    "is_market_type_enable": true,
+    "otc_min_notional": 2,
+    "otc_max_notional": 1000,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "2518.51189426910196",
+     "bid": "2518.51189426910196",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 2.57,
+    "volume_24h": 132.21654845,
+    "change_7D": 2.97,
+    "quote_volume_24h": 327580.2278435,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "2517.9",
+    "lowest_24h_price": "2426.43"
+   },
+   {
+    "symbol": "XRPUSDT",
+    "base_asset": "XRP",
+    "quote_asset": "USDT",
+    "fa_base_asset": "ریپل",
+    "fa_quote_asset": "تتر",
+    "en_base_asset": "Ripple",
+    "en_quote_asset": "Tether",
+    "categories": [
+     13,
+     44,
+     53
+    ],
+    "price": "1.37981",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": false,
+    "is_usdt_based": true,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2020-11-01T00:00:00Z",
+    "amount_precision": 1,
+    "price_precision": 5,
+    "flags": [],
+    "is_market_type_enable": false,
+    "otc_min_notional": 2,
+    "otc_max_notional": 500,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "1.3858138945542",
+     "bid": "1.3858138945542",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 3.82,
+    "volume_24h": 82456.7,
+    "change_7D": 3.47,
+    "quote_volume_24h": 112145.3595,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "1.3869",
+    "lowest_24h_price": "1.3195"
+   },
+   {
+    "symbol": "SOLUSDT",
+    "base_asset": "SOL",
+    "quote_asset": "USDT",
+    "fa_base_asset": "سولانا",
+    "fa_quote_asset": "تتر",
+    "en_base_asset": "Solana",
+    "en_quote_asset": "Tether",
+    "categories": [
+     16,
+     44
+    ],
+    "price": "108.01",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": false,
+    "is_usdt_based": true,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2022-03-16T00:00:00Z",
+    "amount_precision": 5,
+    "price_precision": 2,
+    "flags": [],
+    "is_market_type_enable": false,
+    "otc_min_notional": 2,
+    "otc_max_notional": 600,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "108.70166666666665",
+     "bid": "108.70166666666665",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 1.44,
+    "volume_24h": 789.3589,
+    "change_7D": 3.06,
+    "quote_volume_24h": 84394.1649264,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "108.78",
+    "lowest_24h_price": "105.39"
+   },
+   {
+    "symbol": "DOGEUSDT",
+    "base_asset": "DOGE",
+    "quote_asset": "USDT",
+    "fa_base_asset": "دوج کوین",
+    "fa_quote_asset": "تتر",
+    "en_base_asset": "Dogecoin",
+    "en_quote_asset": "Tether",
+    "categories": [
+     4
+    ],
+    "price": "0.08333",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": true,
+    "is_tmn_based": false,
+    "is_usdt_based": true,
+    "is_zero_fee": false,
+    "leverage_step": 0.5,
+    "max_leverage": 10,
+    "created_at": "2022-12-18T00:00:00Z",
+    "amount_precision": 1,
+    "price_precision": 5,
+    "flags": [],
+    "is_market_type_enable": false,
+    "otc_min_notional": 2,
+    "otc_max_notional": 700,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "0.08343126477238",
+     "bid": "0.08343126477238",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 2.23,
+    "volume_24h": 209818.8,
+    "change_7D": 1.45,
+    "quote_volume_24h": 17155.931159,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "0.08375",
+    "lowest_24h_price": "0.08103"
+   },
+   {
+    "symbol": "CHRTMN",
+    "base_asset": "CHR",
+    "quote_asset": "TMN",
+    "fa_base_asset": "کرومیا",
+    "fa_quote_asset": "تومان",
+    "en_base_asset": "Chromia",
+    "en_quote_asset": "Toman",
+    "categories": [
+     13,
+     22,
+     44,
+     31,
+     10,
+     25
+    ],
+    "price": "5313",
+    "is_new": false,
+    "is_spot": false,
+    "is_otc": true,
+    "is_margin": false,
+    "is_tmn_based": true,
+    "is_usdt_based": false,
+    "is_zero_fee": false,
+    "leverage_step": null,
+    "max_leverage": null,
+    "created_at": "2022-08-21T14:26:37Z",
+    "amount_precision": 2,
+    "price_precision": 0,
+    "flags": [],
+    "is_market_type_enable": false,
+    "otc_min_notional": 90000,
+    "otc_max_notional": 10000000,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "5262.5843913411661342313273",
+     "bid": "5262.5843913411661342313273",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 6.77,
+    "volume_24h": 27961.09,
+    "change_7D": -0.15,
+    "quote_volume_24h": 145408120.9704126,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "5272.1658",
+    "lowest_24h_price": "5059.149"
+   },
+   {
+    "symbol": "COMPTMN",
+    "base_asset": "COMP",
+    "quote_asset": "TMN",
+    "fa_base_asset": "کامپاند",
+    "fa_quote_asset": "تومان",
+    "en_base_asset": "Compound",
+    "en_quote_asset": "Toman",
+    "categories": [
+     13
+    ],
+    "price": "6954427",
+    "is_new": false,
+    "is_spot": false,
+    "is_otc": true,
+    "is_margin": false,
+    "is_tmn_based": true,
+    "is_usdt_based": false,
+    "is_zero_fee": false,
+    "leverage_step": null,
+    "max_leverage": null,
+    "created_at": "2022-06-28T13:19:16Z",
+    "amount_precision": 4,
+    "price_precision": 0,
+    "flags": [],
+    "is_market_type_enable": false,
+    "otc_min_notional": 90000,
+    "otc_max_notional": 10000000,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "6949128.4268047589820293547067",
+     "bid": "6949128.4268047589820293547067",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 1.89,
+    "volume_24h": 13.5203,
+    "change_7D": 22.24,
+    "quote_volume_24h": 90678181.41097972,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "7146713.64",
+    "lowest_24h_price": "6688727.52"
+   },
+   {
+    "symbol": "CGPTUSDT",
+    "base_asset": "CGPT",
+    "quote_asset": "USDT",
+    "fa_base_asset": "چین جی پی تی",
+    "fa_quote_asset": "تتر",
+    "en_base_asset": "ChainGPT",
+    "en_quote_asset": "Tether",
+    "categories": [
+     34,
+     41
+    ],
+    "price": "",
+    "is_new": false,
+    "is_spot": true,
+    "is_otc": true,
+    "is_margin": false,
+    "is_tmn_based": false,
+    "is_usdt_based": true,
+    "is_zero_fee": false,
+    "leverage_step": null,
+    "max_leverage": null,
+    "created_at": "2025-06-09T00:00:00Z",
+    "amount_precision": 2,
+    "price_precision": 6,
+    "flags": [],
+    "is_market_type_enable": false,
+    "otc_min_notional": 5,
+    "otc_max_notional": 100,
+    "otc_buy_enabled": true,
+    "otc_sell_enabled": true,
+    "fair_price": {
+     "ask": "0.02212139834871",
+     "bid": "0.02212139834871",
+     "spot": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "margin_market": {
+      "threshold": null,
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "margin_limit": {
+      "threshold": "5.00",
+      "max_acceptable_buy": null,
+      "max_acceptable_sell": null
+     },
+     "sakoo": {
+      "threshold": "4.00",
+      "max_acceptable_buy": "8.00",
+      "max_acceptable_sell": "8.00"
+     },
+     "market_maker": {
+      "threshold": "5.00",
+      "max_acceptable_buy": "10.00",
+      "max_acceptable_sell": "10.00"
+     }
+    },
+    "change_24h": 0.0,
+    "volume_24h": null,
+    "change_7D": 0.0,
+    "quote_volume_24h": null,
+    "spot_is_new": false,
+    "otc_is_new": false,
+    "highest_24h_price": "0",
+    "lowest_24h_price": "0"
+   }
+  ],
+  "coin_categories": []
+ },
+ "message": "Success",
+ "success": true
+}
