@@ -22,7 +22,11 @@ Layout under the output directory (the repo uses `data/history/`, git-ignored vi
 
 These are design choices, not measured facts:
 
-- Decimal arithmetic for money and quantity; floats only in `metrics.py`. Quantities rounded down to precision.
+- Decimal arithmetic for money and quantity; floats only in `metrics.py`. Quantities rounded down to precision. Money (notional, fees, spread/impact attribution, cash, equity, P&L) is computed in an exact context that traps any rounding, so net = gross - fees - spread - impact holds to the last digit.
+- Stop and target levels are put on the symbol's price tick: the signal's initial stop rounded down, a policy's stop update rounded up (unless that alone would lift it to the close, then down; stops only move up), take-profit levels rounded up.
+- Strategies and exit policies are handed a tuple of at most `BacktestParams.lookback_bars` (default 400) closed bars ending at the current bar; nothing later is reachable from it. The engine refuses a lookback shorter than a component's declared `history_bars` (S1: 300).
+- On the entry bar the position state seen by take-profit logic has `highest_high_since_entry` = the entry bar's open; bar highs are folded in only after the bar closes.
+- E4's breakeven stop covers both fees and the exit's own price give-up: `entry*(1+f)/((1-f)*(1-buffer))`, `ExitParams.breakeven_buffer_bps` default 20 (derive it from the cost model with `CostModel.exit_cost_bps()`). A gap below the stop still fills at the lower open.
 - Signals are evaluated on a closed bar and fill at the **next bar's open**; entry caps (positions, exposure, soft/hard breach, cooldown) are checked at fill time, best score first.
 - Every fill is a taker fill: reference price moved by a half-spread (7.5 bps default) plus a linear impact term (`impact_k` 0.2 x order notional / previous bar's notional, capped at 50 bps). Fee is charged in quote at `taker_rate` 0.0035 (placeholder, unverified; Wallex may charge the received asset).
 - Stops are gap-aware: a gap through the stop fills at the open. If one bar touches both stop and target, the stop is assumed first.
@@ -33,7 +37,8 @@ These are design choices, not measured facts:
 ## Splits and the test set
 
 - `chronological_split` lays out `[train][embargo][validation][embargo][test]` on the bar timestamps. Defaults in code: 60% train, 20% validation, remainder test, with an embargo of at least the longest indicator lookback. These fractions are code defaults, not a committed decision: the actual boundaries must be fixed and committed **before** any run. Changing them after results are seen invalidates the split. `walk_forward` windows also exist.
-- `TestSetGuard` enforces the single-use rule with an append-only JSON-lines ledger: a second `consume()` of the same test-set id raises, across processes.
+- Splits refuse negative embargo/lookback/step sizes and verify that segments are disjoint and separated by the embargo.
+- `TestSetGuard` enforces the single-use rule with an append-only JSON-lines ledger: a second `consume()` of the same test set raises, across processes. The id (`make_test_set_id(split, symbols, dataset=...)`) is the dataset name, the symbols and the test period in whole UTC days (each end rounded to the nearest midnight), so shifting the window by a bar does not create a "new" test set; the guard also refuses any id of the same dataset that shares a symbol and a test day with one already consumed.
 - `sensitivity.py` perturbs each numeric parameter by +/-pct and reports the fraction of neighbours with the same sign of expectancy; it refuses any split except train and validation.
 - Grid runs (S0/S1 × E1–E4) use train and validation only. Variant choice is made on validation.
 - The **test set is used once**. After the variant and the code are frozen, it is evaluated a single time and the result is recorded.

@@ -8,7 +8,7 @@ Code: `strategy/{momentum,config,features,indicators,cooldown,trend_baseline,loo
 
 - Spot, long only, USDT quote, top 10-15 markets by 24h volume (`universe.top_n: 12`).
 - Inputs are **closed** bars only. 15m and 4h are aggregated from 1m candles (Wallex has no native 15m/4h series; see WALLEX_INTEGRATION.md). The forming candle is dropped.
-- Engines are stateless and look-ahead-safe: they read `bars[-1]` and earlier. `strategy/lookahead.py` checks this by re-evaluating on a prefix whose future bars are replaced by wild values. Any error or non-finite value means abstain (`None`).
+- Engines are stateless and look-ahead-safe: they read `bars[-1]` and earlier. Callers hand them a tuple that contains only bars up to the current one (the backtest at most `lookback_bars`). `strategy/lookahead.py` evaluates each cut, then shows the engine the cut continued by wild future bars, then requires the cut's decision to be unchanged (no information carried back through state) and repeatable. Any error or non-finite value means abstain (`None`). On the downloaded Wallex history (BTC/ETH/PEPE, 15m, about 4300 bars each, fee 0.001) S1 with default parameters produced **no** signals; the look-ahead check is exercised on a synthetic breakout with a future present (`tests/test_strategy_baseline_lookahead.py`). A one-off run with relaxed parameters (cost_mult 1, min_score 0.4, roc_z_min 0.5, volume_mult 1.3, max_zero_volume_frac 0.5) found 1/3/6 signal bars on BTC/ETH/PEPE and the check passed at each of them with 200 wild future bars; that run is not part of the test suite (tests do not read `data/`).
 
 ## S1 entry rules (`MomentumSignalEngine`, params in `strategy/config.py::MomentumParams`)
 
@@ -43,7 +43,7 @@ The hard stop (the signal's stop) applies to all. `on_bar` runs on each closed b
 - **E1 `FixedRR`**: full take-profit at entry + 1.5 R.
 - **E2 `ChandelierTrail`**: once the highest high >= entry + 1 R, trail the stop at highest high - 2 x ATR(14), ratcheting up only.
 - **E3 `MomentumFailure`**: exit at the next open after a close below EMA(9), or ROC(3) < 0, or two consecutive volume-dry bars (< 0.5 x prior 20-bar median).
-- **E4 `Hybrid`** (pre-registered leader): sell 50% at +1 R, then move the stop to breakeven plus fees and chandelier-trail the rest; E3 exit; false-breakout exit (close back below the breakout level within 2 bars); time stop at 16 bars unless the partial was taken. `fee_rate` 0.0035 is a placeholder.
+- **E4 `Hybrid`** (pre-registered leader): sell 50% at +1 R, then move the stop to breakeven plus fees plus an exit-cost buffer (`breakeven_buffer_bps`, default 20 bps for spread and impact on the stop fill) and chandelier-trail the rest; E3 exit; false-breakout exit (close back below the breakout level within 2 bars); time stop at 16 bars unless the partial was taken. `fee_rate` 0.0035 is a placeholder.
 
 Exit orders are reduce-only; the kill switch does not block them (RISK.md).
 

@@ -166,6 +166,44 @@ def test_stale_feed_flatten_policy_sells_limit_first(rig, make):
     assert o.type is OrderType.LIMIT and o.price == D("59880.00")
 
 
+def test_future_dated_quote_is_not_fresh_and_a_frozen_feed_still_goes_stale(rig, gstore, make):
+    """Verifier f2.py: ONE quote with a far-future ts kept _last_fresh in the future, so 50 minutes
+    of frozen feed produced no stale_feed and no kill switch."""
+    buy(rig)
+    live(rig, 1)
+    g = make()
+    assert g.tick().conditions == []
+    bids, asks, ts = rig.broker._books[SYM]
+    rig.broker._books[SYM] = (bids, asks, ts + 10**9)       # one bogus timestamp (ms vs s / clock step)
+    rig.store.heartbeat("strategy")
+    rep = g.tick()
+    assert rep.conditions == [f"future_quote_ts:{SYM}", "unmarked:BTC"]     # not used to mark either
+    assert gstore.equity_hwm() is not None and not rig.ks.is_engaged()
+    rig.broker._books[SYM] = (bids, asks, ts)               # the feed is now frozen at the old ts
+    for _ in range(5):
+        rig.clock.advance(600)
+        rig.store.heartbeat("strategy")
+        rep = g.tick()
+    assert "stale_feed" in rep.conditions and "stale_hold" in rep.conditions
+    assert rig.ks.is_engaged() and entry_blocked(rig)
+    errors = [r for r in gstore.rows("errors") if "ahead of the clock" in r["message"]]
+    assert len(errors) == 1                                  # logged once, not every tick
+
+
+def test_backward_clock_step_cannot_keep_a_symbol_fresh(rig, make):
+    buy(rig)
+    live(rig, 1)
+    g = make()
+    g.tick()
+    rig.clock.advance(-3600)                                 # the guardian's clock steps back an hour
+    rig.store.heartbeat("strategy")
+    g.tick()
+    rig.clock.advance(31)                                    # 31 s of frozen feed on the new clock
+    rig.store.heartbeat("strategy")
+    rep = g.tick()
+    assert "stale_feed" in rep.conditions and rig.ks.is_engaged()
+
+
 def test_stale_feed_does_not_move_sod_or_hwm(rig, gstore, make):
     g = make()
     rig.clock.advance(31)

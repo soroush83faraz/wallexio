@@ -69,7 +69,7 @@ Each tick (`GuardianConfig` defaults) the guardian reconciles the OMS, reads bal
 | Soft breach (daily loss 4%, drawdown 8%) | Engage kill switch (entries off) |
 | Hard breach (daily loss 6%, drawdown 12%) | Flatten everything |
 | Exchange base balance differs from the OMS ledger by more than max(1 amount step, 0.1% of ledger) on 2 consecutive ticks | Kill switch + `needs_review`; exchange wins, nothing in the ledger is "fixed" |
-| No fresh quote for more than `max_data_age_s` (30 s) | Kill switch |
+| No fresh quote for more than `max_data_age_s` (30 s). A quote dated more than `max_quote_future_skew_s` (5 s) after the guardian's clock is invalid (condition `future_quote_ts`, not used to mark); freshness is clamped to now, so a bogus timestamp or a backward clock step cannot hide a frozen feed | Kill switch |
 | No fresh quote for more than 120 s | `stale_action`: `hold` (default) or `flatten` |
 | Strategy heartbeat older than 60 s | Kill switch |
 | Error while evaluating breaches | Kill switch (fail closed) |

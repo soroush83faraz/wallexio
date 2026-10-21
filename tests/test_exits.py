@@ -94,9 +94,13 @@ def test_e4_partial_target_then_breakeven_plus_fees_then_trail():
     # after the partial, chandelier (101.5 - 4 = 97.5) is below breakeven+fees -> breakeven+fees
     d = p.on_bar(st(partial_taken=True, highest_high_since_entry=D("101.5")), bars)
     assert d.action == "update_stop" and d.reason == "breakeven_plus_fees"
-    assert d.new_stop == D("100") * D("1.0035") / D("0.9965")
-    # a sale at that stop, net of a 0.35% fee, repays the buy incl. its 0.35% fee
-    assert d.new_stop * (1 - D("0.0035")) >= D("100") * (1 + D("0.0035")) - D("1e-20")
+    assert d.new_stop == D("100") * D("1.0035") / (D("0.9965") * D("0.998"))      # 20 bps exit buffer
+    # a sale filled 20 bps below that stop, net of a 0.35% fee, repays the buy incl. its 0.35% fee
+    assert d.new_stop * D("0.998") * (1 - D("0.0035")) >= D("100") * (1 + D("0.0035")) - D("1e-20")
+    # buffer 0 is the fee-only breakeven
+    d0 = Hybrid(ExitParams(breakeven_buffer_bps=D(0))).on_bar(
+        st(partial_taken=True, highest_high_since_entry=D("101.5")), bars)
+    assert d0.new_stop == D("100") * D("1.0035") / D("0.9965")
     # chandelier above breakeven -> trail
     d = p.on_bar(st(partial_taken=True, highest_high_since_entry=D("111")), bars)
     assert (d.action, d.new_stop, d.reason) == ("update_stop", D("107"), "chandelier_trail")
@@ -116,6 +120,18 @@ def test_e4_false_breakout_time_stop_and_failure():
         st(bars_held=16, partial_taken=True), bars).reason == "time_stop"
     fail = bars + [c(40, 139, 139.5, 120, 121)]
     assert p.on_bar(st(), fail).reason == "momentum_fail_ema"
+
+
+def test_breakeven_buffer_derived_from_the_cost_model():
+    from wallexbot.backtest.costs import CostModel
+    cm = CostModel()
+    assert cm.exit_cost_bps() == D("57.5")                               # 7.5 half spread + 50 cap
+    assert cm.exit_cost_bps(D(1000), D(1_000_000)) == D("9.5")          # 7.5 + 0.2 * 0.1% = 2 bps
+    p = Hybrid(ExitParams(breakeven_buffer_bps=cm.exit_cost_bps()))
+    assert p.breakeven_stop(st()) == D("100") * D("1.0035") / (D("0.9965") * (1 - D("0.00575")))
+    assert ExitParams().history_bars == 71                                # ATR 14 x 5 + 1
+    with pytest.raises(ValueError):
+        ExitParams(breakeven_buffer_bps=D(-1))
 
 
 def test_params_validation():

@@ -26,6 +26,18 @@ path. What it does guarantee is that none of the following appear anywhere in sr
    module, such as WallexAccountReader, stay importable: doctor.py uses them), and calling any
    submit-like method (`*submit*`, `place_order`, `send_order`, `create_order`, `new_order`,
    `post_order`).
+5. Outside oms.py, pipeline.py and exchange/: ANY attribute named `submit`, on any receiver,
+   unless it is the literal callee of a call `self.oms.submit(...)` inside an allow-listed
+   (file, scope) of ALLOWED_OMS_SUBMIT. So aliasing (`s = self.oms.submit; s(i)`), pass-through
+   (`map(oms.submit, xs)`, `functools.partial(oms.submit, i)()`), `.submit.__call__(...)` /
+   `.submit.__get__` and a bare `g.submit` are flagged everywhere. Calls are counted per scope
+   INCLUDING lambdas and comprehensions nested in it (they do not open a new scope), and an
+   allowed call nested in a lambda, comprehension or loop is flagged (it can run more than once).
+
+Residual blind spots (why this is a lint, not a proof): anything reached without spelling
+`.submit` / `submit_order` in src (e.g. a method looked up through an object passed in from a
+caller, code generated at runtime, a C extension), and runtime repetition through recursion or a
+loop in a CALLER of the allowed scope. The allowed scope itself is reviewed by hand.
 """
 from __future__ import annotations
 
@@ -70,8 +82,25 @@ BROKER_NAMES = frozenset({"MockWallex", "mock_wallex", "WallexBroker", "wallex_p
 SUBMIT_LIKE = re.compile(r"submit|^(place|send|create|new|post)_?orders?$", re.IGNORECASE)
 
 
+BOUND_METHOD_ATTRS = frozenset({"__call__", "__get__", "__func__", "__self__", "__wrapped__"})
+# Constructs whose body can execute more than once per call of the enclosing function.
+REPEATING = (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.For, ast.AsyncFor,
+             ast.While)
+SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+
+
 def _broker_ok(rel: str) -> bool:
     return rel in ("oms.py", "pipeline.py") or rel.startswith("exchange/")
+
+
+def _repeating_ancestor(node: ast.AST, parents: dict) -> str | None:
+    """Name of the innermost lambda/comprehension/loop between `node` and its enclosing def."""
+    p = parents.get(node)
+    while p is not None and not isinstance(p, SCOPE_NODES):
+        if isinstance(p, REPEATING):
+            return type(p).__name__
+        p = parents.get(p)
+    return None
 
 
 def _fragment(s: str, min_len: int) -> bool:
@@ -217,15 +246,33 @@ def scan_source(source: str, rel: str) -> tuple[list[Violation], list[tuple[str,
                 flag(node, "broker", f"references {node.id}")
             if isinstance(node, ast.Attribute) and node.attr in BROKER_NAMES:
                 flag(node, "broker", f"references .{node.attr}")
+            # 5. `.submit` on ANY receiver: the only tolerated form is the literal callee of a Call
+            #    `self.oms.submit(...)` in an allow-listed (file, scope), not nested in a construct
+            #    that can run it more than once. Aliases (`s = self.oms.submit`), pass-through
+            #    (`map(oms.submit, xs)`, `functools.partial(oms.submit, i)`), `.submit.__call__`
+            #    and `.submit.__get__` are all a `.submit` attribute that is not that callee.
+            if isinstance(node, ast.Attribute) and node.attr == "submit":
+                parent = parents.get(node)
+                is_callee = isinstance(parent, ast.Call) and parent.func is node
+                on_self_oms = isinstance(node.value, ast.Attribute) and node.value.attr == "oms" and \
+                    isinstance(node.value.value, ast.Name) and node.value.value.id == "self"
+                if is_callee and on_self_oms and (rel, scope) in ALLOWED_OMS_SUBMIT:
+                    repeat = _repeating_ancestor(node, parents)
+                    if repeat:
+                        flag(node, "broker", f"oms.submit inside a {repeat} in {scope} (may run more than once)")
+                    oms_submits.setdefault((rel, scope), []).append(node.lineno)
+                elif isinstance(parent, ast.Attribute) and parent.attr in BOUND_METHOD_ATTRS:
+                    flag(node, "broker", f".submit.{parent.attr} in {scope or '<module>'}")
+                else:
+                    flag(node, "broker", f".submit referenced in {scope or '<module>'}"
+                         + ("" if is_callee else " without being called (alias / pass-through)"))
             if isinstance(node, ast.Call):
                 f = node.func
                 name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
-                on_self_oms = isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and \
-                    f.value.attr == "oms" and isinstance(f.value.value, ast.Name) and f.value.value.id == "self"
-                if name == "submit" and on_self_oms and (rel, scope) in ALLOWED_OMS_SUBMIT:
-                    oms_submits.setdefault((rel, scope), []).append(node.lineno)
-                elif name and SUBMIT_LIKE.search(name):
+                if name and name != "submit" and SUBMIT_LIKE.search(name):
                     flag(node, "broker", f"calls submit-like {name}()")
+                elif name == "submit" and not isinstance(f, ast.Attribute):
+                    flag(node, "broker", "calls a bare submit()")
         for child in ast.iter_child_nodes(node):
             visit(child, scope)
 
@@ -349,6 +396,33 @@ ROGUE = {
                                          "        o.submit(i)\n"),
     "oms.submit in guardian monitor": ("guardian/monitor.py",
                                        "class Guardian:\n    def tick(self, i):\n        self.oms.submit(i)\n"),
+    # verifier's Day-2 counterexamples (all previously MISSED)
+    "alias oms.submit in monitor": ("guardian/monitor.py",
+                                    "class Guardian:\n    def tick(self, i):\n        s = self.oms.submit\n"
+                                    "        s(i)\n"),
+    "__call__ in monitor": ("guardian/monitor.py",
+                            "class Guardian:\n    def tick(self, i):\n        self.oms.submit.__call__(i)\n"),
+    "partial in strategy": ("strategy/rogue.py",
+                            "import functools\ndef run(oms, i):\n    functools.partial(oms.submit, i)()\n"),
+    "alias oms.submit in risk": ("risk/rogue.py", "def run(oms, i):\n    f = oms.submit\n    f(i)\n"),
+    "map over submit": ("ai/rogue.py", "def run(oms, xs):\n    list(map(oms.submit, xs))\n"),
+    "lambda inside allowed scope twice": ("guardian/flatten.py",
+                                          "class _Flattener:\n    def _place_exit(self, i):\n"
+                                          "        f = lambda: self.oms.submit(i)\n        f(); f()\n"),
+    "bare attribute in another scope": ("guardian/flatten.py",
+                                        "class _Flattener:\n    def _place_exit(self, i):\n"
+                                        "        self.oms.submit(i)\n    def other(self, i):\n"
+                                        "        g = self.oms\n        g.submit\n"),
+    "__get__ in allowed scope": ("guardian/flatten.py",
+                                 "class _Flattener:\n    def _place_exit(self, i):\n"
+                                 "        self.oms.submit.__get__(self.oms)(i)\n"),
+    "comprehension in allowed scope": ("guardian/flatten.py",
+                                       "class _Flattener:\n    def _place_exit(self, xs):\n"
+                                       "        return [self.oms.submit(x) for x in xs]\n"),
+    "loop in allowed scope": ("guardian/flatten.py",
+                              "class _Flattener:\n    def _place_exit(self, xs):\n        for x in xs:\n"
+                              "            self.oms.submit(x)\n"),
+    "class-level call of submit": ("risk/rogue.py", "def run(OMS, oms, i):\n    OMS.submit(oms, i)\n"),
 }
 
 
