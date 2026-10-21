@@ -1,0 +1,24 @@
+mode: mock            # mock | shadow | live (live is rejected unless fully armed)
+quote_currency: USDT
+host: api.wallex.ir
+universe:
+  top_n: 12
+  max_spread_bps: 15
+  max_slippage_bps: 20
+  min_depth_multiple: 5
+  max_data_age_s: 30
+risk:
+  risk_per_trade_pct: "1.0"
+  max_position_pct: "25"
+  max_exposure_pct: "60"
+  max_open_positions: 3
+  max_order_value: "1000"
+  daily_loss_soft_pct: "4"
+  daily_loss_hard_pct: "6"
+  drawdown_soft_pct: "8"
+  drawdown_hard_pct: "12"
+  consecutive_loss_cooldown: 3
+  min_notional: "5"          # placeholder, unverified on Wallex
+fees:
+  taker_rate: "0.0035"       # placeholder, unverified
+  maker_rate: "0.0035"
