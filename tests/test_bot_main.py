@@ -1,7 +1,6 @@
 """bot.main: mode gating, broker factory, offline replay run, PublicFeed wiring (fake client)."""
 import re
 import sys
-import types
 from decimal import Decimal
 
 import pytest
@@ -40,20 +39,16 @@ def test_make_broker_modes(monkeypatch):
     with pytest.raises(bot_main.BotSetupError, match="not wired"):
         bot_main.make_broker("live", config=cfg, clock=MockClock(), rules=rules)
     paper = bot_main.make_broker("mock", config=cfg, clock=MockClock(), rules=rules)
-    assert paper.balances()["USDT"].free == D("10000")
+    assert paper.balances()["USDT"].free == D("1000")
     monkeypatch.setitem(sys.modules, "wallexbot.exchange.shadow", None)        # not installed
     with pytest.raises(bot_main.BotSetupError, match="ShadowBroker"):
         bot_main.make_broker("shadow", config=cfg, clock=MockClock(), rules=rules, book_source=lambda s: None)
-    fake = types.ModuleType("wallexbot.exchange.shadow")
-
-    class ShadowBroker:
-        def __init__(self, book_source, rules, starting_balances, maker_rate, taker_rate, clock):
-            self.args = (book_source, list(rules), starting_balances, maker_rate, taker_rate, clock)
-
-    fake.ShadowBroker = ShadowBroker
-    monkeypatch.setitem(sys.modules, "wallexbot.exchange.shadow", fake)
-    b = bot_main.make_broker("shadow", config=cfg, clock=MockClock(), rules=rules, book_source=len)
-    assert b.args[0] is len and b.args[2] == {"USDT": D("10000")}
+    monkeypatch.undo()                                                         # the REAL ShadowBroker
+    from wallexbot.exchange.shadow import ShadowBroker
+    b = bot_main.make_broker("shadow", config=cfg, clock=MockClock(), rules=rules, book_source=len,
+                             balances={"USDT": D("250")}, journal_path=None)
+    assert isinstance(b, ShadowBroker) and b.balances()["USDT"].free == D("250")
+    assert b.maker_rate == cfg.maker_rate and b.taker_rate == cfg.taker_rate
 
 
 def _cheap_yaml(tmp_path):

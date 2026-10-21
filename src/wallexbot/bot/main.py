@@ -50,6 +50,9 @@ from wallexbot.strategy.sizing import size_position
 from wallexbot.types import IntentState, SymbolRules
 
 ALLOWED_MODES = ("mock", "shadow")
+DEFAULT_BALANCE = Decimal("1000")        # USDT; override with --balance
+BOOK_MAX_AGE_S = 60.0                    # a cached public depth older than this is not a book to simulate fills on
+JOURNAL_NAME = "shadow_journal.jsonl"    # next to the database
 GUARDIAN_HINT = "run the guardian as a separate process: python -m wallexbot.guardian.main --db {db} --mode {mode}"
 _MONTH_FILE = re.compile(r"^(?P<sym>[A-Z0-9]{3,20})_1m_(?P<y>\d{4})-(?P<m>\d{2})\.csv$")
 log = logging.getLogger("wallexbot.bot")
@@ -89,11 +92,12 @@ class StopFlag:
 
 # ---------------------------------------------------------------------------- wiring
 def make_broker(mode: str, *, config: Config, clock: Callable[[], float], rules: Mapping[str, SymbolRules],
-                book_source: Callable[[str], Any] | None = None, balances: Mapping[str, Decimal] | None = None):
+                book_source: Callable[[str], Any] | None = None, balances: Mapping[str, Decimal] | None = None,
+                journal_path: str | Path | None = None):
     """The broker object for a mode. mock: paper MockWallex (built on the order-path side, in
     pipeline.py). shadow: ShadowBroker over the live public book, imported lazily. Anything else
     (live in particular) is refused."""
-    bal = dict(balances) if balances is not None else {config.quote_currency: Decimal("10000")}
+    bal = dict(balances) if balances is not None else {config.quote_currency: DEFAULT_BALANCE}
     if mode == "mock":
         return build_paper_broker(config, clock, rules, bal)
     if mode == "shadow":
@@ -104,8 +108,38 @@ def make_broker(mode: str, *, config: Config, clock: Callable[[], float], rules:
                                 "available in this build") from e
         if book_source is None:
             raise BotSetupError("shadow mode needs a book source (public depth snapshots)")
-        return ShadowBroker(book_source, rules.values(), bal, config.maker_rate, config.taker_rate, clock)
+        return ShadowBroker(book_source, rules.values(), bal, config.maker_rate, config.taker_rate, clock,
+                            journal_path=journal_path)
     raise BotSetupError(f"mode {mode!r} is not wired into the bot (allowed: {', '.join(ALLOWED_MODES)})")
+
+
+def fresh_depth_source(feed, clock: Callable[[], float], max_age_s: float = BOOK_MAX_AGE_S) -> Callable[[str], Any]:
+    """Book source for ShadowBroker that REUSES the feed's cached public depth (no extra requests).
+    No book, or one older than `max_age_s`, raises: the broker then books a book_error and moves nothing."""
+    def source(symbol: str):
+        d = feed.depth(symbol)
+        if d is None:
+            raise LookupError(f"no depth cached for {symbol}")
+        if clock() - d.ts > max_age_s:
+            raise LookupError(f"cached depth for {symbol} is stale ({clock() - d.ts:.0f}s old)")
+        return d
+    return source
+
+
+def pre_tick(feed, broker, clock: Callable[[], float]) -> None:
+    """Before each tick of a broker that simulates over time (ShadowBroker): refresh the feed (depth
+    requests are rate-limited per symbol, so the tick's own refresh then costs nothing) and let the
+    broker match its eligible resting orders against that fresh book."""
+    if not hasattr(broker, "step"):
+        return
+    try:
+        feed.refresh(clock())
+    except Exception:
+        log.exception("bot: pre-tick feed refresh failed")
+    try:
+        broker.step(clock())
+    except Exception:
+        log.exception("bot: broker step failed")
 
 
 def build_stack(store: Store, broker, rules: Mapping[str, SymbolRules], config: Config, clock):
@@ -206,7 +240,8 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
                   max_ticks: int | None = None, client: Any = None, balances: Mapping[str, Decimal] | None = None,
                   advisor: Any = None, stop: StopFlag | None = None, clock: Callable[[], float] = time.time,
                   sleep: Callable[[float], Any] | None = None,
-                  on_tick: Callable[[Any], Any] | None = None) -> dict[str, Any]:
+                  on_tick: Callable[[Any], Any] | None = None,
+                  journal_path: str | Path | None = None) -> dict[str, Any]:
     """mock (paper broker mirrored from the public book) or shadow (ShadowBroker) on PublicFeed."""
     stop = stop or StopFlag()
     sleep = sleep or stop.wait
@@ -215,7 +250,8 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
         client = WallexPublicClient()
     rules = {r.symbol: r for r in client.markets() if r.quote == config.quote_currency}
     feed = PublicFeed(client, config)
-    broker = make_broker(mode, config=config, clock=clock, rules=rules, book_source=feed.depth, balances=balances)
+    broker = make_broker(mode, config=config, clock=clock, rules=rules, balances=balances, journal_path=journal_path,
+                         book_source=fresh_depth_source(feed, clock))
     if mode == "mock":
         feed.on_book = broker.set_book   # paper fills at the live public prices
     store = Store(db, clock=clock)
@@ -224,11 +260,7 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
         bot = build_bot(feed, oms, risk, store, ks, config, clock, advisor=advisor)
         ticks = 0
         while not stop.is_set() and (max_ticks is None or ticks < max_ticks):
-            if hasattr(broker, "step"):        # ShadowBroker matches resting orders on step()
-                try:
-                    broker.step(clock())
-                except Exception:
-                    log.exception("bot: broker step failed")
+            pre_tick(feed, broker, clock)
             rep = bot.tick()
             ticks += 1
             if on_tick is not None:
@@ -242,7 +274,9 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
 
 
 # ---------------------------------------------------------------------------- CLI
-def main(argv: Sequence[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
+         after_tick: Callable[[Any], Any] | None = None) -> int:
+    """`advisor` / `after_tick` are injected by the top-level CLI (bot/ itself never imports ai/)."""
     p = argparse.ArgumentParser(prog="python -m wallexbot.bot.main",
                                 description="Autonomous trading loop (mock / shadow only; live is refused).")
     p.add_argument("--db", required=True, help="path of the audit SQLite database")
@@ -252,7 +286,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--interval-s", type=float, default=None,
                    help="replay: simulated seconds per tick (60); otherwise wall seconds between ticks (12)")
     p.add_argument("--config", default=None, help="config YAML (default: config/default.yaml)")
-    p.add_argument("--balance", default="10000", help="starting paper balance in the quote currency")
+    p.add_argument("--balance", default=str(DEFAULT_BALANCE), help="starting balance in the quote currency (USDT)")
     args = p.parse_args(argv)
     if args.mode == "live":
         print("refused: live trading is not wired into the bot; use --mode mock or --mode shadow",
@@ -279,6 +313,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             previous[sig] = signal.signal(sig, lambda *_: stop.set())
 
     def show(rep) -> None:
+        if after_tick is not None:
+            after_tick(rep)
         if rep.actions or rep.errors:
             print(f"tick ts={rep.ts:.0f} actions={rep.actions} errors={rep.errors}", flush=True)
 
@@ -286,10 +322,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         balances = {cfg.quote_currency: balance}
         if args.replay_from:
             summary = run_replay(args.db, args.replay_from, cfg, step_s=args.interval_s or 60.0,
-                                 max_ticks=args.max_ticks, balances=balances, stop=stop, on_tick=show)
+                                 max_ticks=args.max_ticks, balances=balances, stop=stop, on_tick=show,
+                                 advisor=advisor)
         else:
+            journal = None if str(args.db) == ":memory:" else Path(args.db).parent / JOURNAL_NAME
             summary = run_feed_loop(args.mode, args.db, cfg, interval_s=args.interval_s or 12.0,
-                                    max_ticks=args.max_ticks, balances=balances, stop=stop, on_tick=show)
+                                    max_ticks=args.max_ticks, balances=balances, stop=stop, on_tick=show,
+                                    advisor=advisor, journal_path=journal if args.mode == "shadow" else None)
     except BotSetupError as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2
