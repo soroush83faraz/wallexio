@@ -1,0 +1,403 @@
+"""Append-only SQLite (WAL) audit store.
+
+Invariants:
+- Every table is append-only (UPDATE/DELETE raise via triggers), except the `state` and
+  `updated_at` columns of order_intents. Intent state changes are compare-and-set, checked
+  against LEGAL_TRANSITIONS in Python AND by a trigger, and logged to intent_state_log.
+- Money/quantity values are Decimal, stored as TEXT (str(Decimal) round-trips exactly).
+  Floats are refused at this boundary.
+- Every payload / free-text column passes through redact() before it is written.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import sqlite3
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
+from typing import Any, Iterable, Iterator
+
+from wallexbot.redact import redact
+from wallexbot.types import Fill, IntentState, OrderIntent, OrderType, Position, Side
+
+S = IntentState
+LEGAL_TRANSITIONS: dict[IntentState, frozenset[IntentState]] = {
+    S.PROPOSED: frozenset({S.RISK_APPROVED, S.REJECTED}),
+    S.RISK_APPROVED: frozenset({S.SUBMITTED, S.UNKNOWN_PENDING, S.REJECTED}),
+    S.SUBMITTED: frozenset({S.PARTIALLY_FILLED, S.FILLED, S.CANCELED, S.REJECTED,
+                            S.UNKNOWN_PENDING, S.NEEDS_REVIEW}),
+    S.PARTIALLY_FILLED: frozenset({S.FILLED, S.CANCELED, S.UNKNOWN_PENDING, S.NEEDS_REVIEW}),
+    S.UNKNOWN_PENDING: frozenset({S.SUBMITTED, S.PARTIALLY_FILLED, S.FILLED, S.CANCELED,
+                                  S.REJECTED, S.NEEDS_REVIEW}),
+    S.FILLED: frozenset(),
+    S.CANCELED: frozenset(),
+    S.REJECTED: frozenset(),
+    S.NEEDS_REVIEW: frozenset(),
+}
+
+APPEND_ONLY_TABLES = ("signals", "risk_decisions", "intent_state_log", "broker_events", "fills",
+                      "positions_snapshots", "killswitch_events", "equity_sod", "equity_hwm", "errors")
+AUDIT_TABLES = ("signals", "risk_decisions", "order_intents", "intent_state_log", "broker_events",
+                "fills", "positions_snapshots", "killswitch_events", "equity_sod", "equity_hwm", "errors")
+POSITION_LEDGER_KEYS = ("cost_basis", "realized_at_open")
+_INTENT_IMMUTABLE = ("client_id", "intent_id", "signal_id", "symbol", "side", "type", "quantity",
+                     "price", "stop_price", "reduce_only", "created_at", "payload")
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS signals(id INTEGER PRIMARY KEY, ts REAL NOT NULL, signal_id TEXT NOT NULL,
+    symbol TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS risk_decisions(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
+    client_id TEXT NOT NULL, approved INTEGER NOT NULL, hard_breach INTEGER NOT NULL,
+    reasons TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS order_intents(client_id TEXT PRIMARY KEY, intent_id TEXT NOT NULL,
+    signal_id TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL, type TEXT NOT NULL,
+    quantity TEXT NOT NULL, price TEXT, stop_price TEXT, reduce_only INTEGER NOT NULL,
+    state TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS intent_state_log(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
+    client_id TEXT NOT NULL, from_state TEXT, to_state TEXT NOT NULL, reason TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS broker_events(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
+    client_id TEXT NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS fills(id INTEGER PRIMARY KEY, ts REAL NOT NULL, client_id TEXT NOT NULL,
+    seq INTEGER NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL, price TEXT NOT NULL,
+    quantity TEXT NOT NULL, quote_amount TEXT NOT NULL, fee TEXT NOT NULL, fee_asset TEXT NOT NULL,
+    fee_quote TEXT NOT NULL, UNIQUE(client_id, seq));
+CREATE TABLE IF NOT EXISTS positions_snapshots(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
+    symbol TEXT NOT NULL, quantity TEXT NOT NULL, avg_price TEXT NOT NULL, realized_pnl TEXT NOT NULL,
+    stop_price TEXT, closed_pnl TEXT, cost_basis TEXT, realized_at_open TEXT, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS killswitch_events(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
+    engaged INTEGER NOT NULL CHECK (engaged IN (0, 1)), reason TEXT NOT NULL, actor TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS equity_sod(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
+    day TEXT NOT NULL UNIQUE, equity TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS equity_hwm(id INTEGER PRIMARY KEY, ts REAL NOT NULL, equity TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY, ts REAL NOT NULL, source TEXT NOT NULL,
+    message TEXT NOT NULL, payload TEXT NOT NULL);
+"""
+
+
+class StoreError(Exception):
+    pass
+
+
+class IllegalTransition(StoreError):
+    pass
+
+
+class StaleState(StoreError):
+    """Compare-and-set failed: the intent is no longer in the expected state."""
+
+
+@dataclass(frozen=True)
+class IntentRecord:
+    intent: OrderIntent
+    state: IntentState
+    created_at: float
+    updated_at: float
+
+
+@dataclass(frozen=True)
+class FillTotals:
+    count: int
+    quantity: Decimal
+    quote_amount: Decimal
+    fee: Decimal
+
+
+@dataclass(frozen=True)
+class KillswitchEvent:
+    engaged: bool
+    reason: str
+    actor: str
+    ts: float
+
+
+def _jsonable(obj: Any) -> Any:
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, Decimal):
+        return str(obj)
+    if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+        return {f.name: _jsonable(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set, frozenset)):
+        return [_jsonable(v) for v in obj]
+    if obj is None or isinstance(obj, (bool, int, str)):
+        return obj
+    if isinstance(obj, float):
+        return repr(obj)
+    return str(obj)
+
+
+def _payload(obj: Any) -> str:
+    """JSON-safe conversion first, then redact (so every string is seen), then serialise."""
+    return json.dumps(redact(_jsonable(obj if obj is not None else {})), sort_keys=True)
+
+
+def _text(s: str) -> str:
+    return str(redact(str(s)))
+
+
+def _dec(v: Decimal | None) -> str | None:
+    if v is None:
+        return None
+    if not isinstance(v, Decimal) or not v.is_finite():
+        raise StoreError(f"refusing non-Decimal / non-finite money value {v!r}")
+    return str(v)
+
+
+def _undec(s: str | None) -> Decimal | None:
+    return None if s is None else Decimal(s)
+
+
+def _transition_sql() -> str:
+    clauses = []
+    for src, dsts in LEGAL_TRANSITIONS.items():
+        if dsts:
+            lst = ",".join(f"'{d.value}'" for d in sorted(dsts, key=lambda x: x.value))
+            clauses.append(f"(OLD.state = '{src.value}' AND NEW.state IN ({lst}))")
+    return " OR ".join(clauses)
+
+
+class Store:
+    def __init__(self, path: str | Path, clock=time.time) -> None:
+        self.path = str(path)
+        self._clock = clock
+        self._depth = 0
+        self._conn = sqlite3.connect(self.path, isolation_level=None)
+        self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._init_schema()
+
+    # ---------------------------------------------------------------- infrastructure
+    def _init_schema(self) -> None:
+        stmts = [_SCHEMA]
+        for t in APPEND_ONLY_TABLES:
+            stmts.append(f"CREATE TRIGGER IF NOT EXISTS {t}_no_update BEFORE UPDATE ON {t} "
+                         f"BEGIN SELECT RAISE(ABORT, '{t} is append-only'); END;")
+            stmts.append(f"CREATE TRIGGER IF NOT EXISTS {t}_no_delete BEFORE DELETE ON {t} "
+                         f"BEGIN SELECT RAISE(ABORT, '{t} is append-only'); END;")
+        changed = " OR ".join(f"NEW.{c} IS NOT OLD.{c}" for c in _INTENT_IMMUTABLE)
+        stmts.append("CREATE TRIGGER IF NOT EXISTS order_intents_no_delete BEFORE DELETE ON order_intents "
+                     "BEGIN SELECT RAISE(ABORT, 'order_intents is append-only'); END;")
+        stmts.append("CREATE TRIGGER IF NOT EXISTS order_intents_immutable BEFORE UPDATE ON order_intents "
+                     f"WHEN {changed} BEGIN SELECT RAISE(ABORT, 'order_intents: only state/updated_at "
+                     "may change'); END;")
+        stmts.append("CREATE TRIGGER IF NOT EXISTS order_intents_transition BEFORE UPDATE OF state ON "
+                     f"order_intents WHEN NEW.state IS NOT OLD.state AND NOT ({_transition_sql()}) "
+                     "BEGIN SELECT RAISE(ABORT, 'illegal intent state transition'); END;")
+        self._conn.executescript("\n".join(stmts))
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def now(self) -> float:
+        return float(self._clock())
+
+    def _ts(self, ts: float | None) -> float:
+        return self.now() if ts is None else float(ts)
+
+    @contextmanager
+    def tx(self) -> Iterator[None]:
+        """Atomic block. Nested calls use savepoints."""
+        if self._depth == 0:
+            self._conn.execute("BEGIN IMMEDIATE")
+            begin, commit, rollback = None, "COMMIT", "ROLLBACK"
+        else:
+            sp = f"sp{self._depth}"
+            self._conn.execute(f"SAVEPOINT {sp}")
+            begin, commit, rollback = sp, f"RELEASE {sp}", f"ROLLBACK TO {sp}"
+        self._depth += 1
+        try:
+            yield
+        except BaseException:
+            self._depth -= 1
+            if self._conn.in_transaction:
+                self._conn.execute(rollback)
+                if begin is not None:
+                    self._conn.execute(f"RELEASE {begin}")
+            raise
+        self._depth -= 1
+        self._conn.execute(commit)
+
+    def _insert(self, table: str, row: dict[str, Any]) -> int:
+        cols = ",".join(row)
+        qs = ",".join("?" for _ in row)
+        cur = self._conn.execute(f"INSERT INTO {table}({cols}) VALUES ({qs})", tuple(row.values()))
+        return int(cur.lastrowid)
+
+    def rows(self, table: str) -> list[dict[str, Any]]:
+        if table not in AUDIT_TABLES:
+            raise StoreError(f"unknown table {table!r}")
+        return [dict(r) for r in self._conn.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+
+    # ---------------------------------------------------------------- append-only writers
+    def append_signal(self, signal_id: str, symbol: str, payload: dict | None = None,
+                      ts: float | None = None) -> int:
+        return self._insert("signals", {"ts": self._ts(ts), "signal_id": signal_id,
+                                        "symbol": symbol, "payload": _payload(payload)})
+
+    def append_risk_decision(self, client_id: str, decision: Any, ts: float | None = None) -> int:
+        """`decision` is a risk.engine.RiskDecision (approved, reasons, hard_breach)."""
+        return self._insert("risk_decisions", {
+            "ts": self._ts(ts), "client_id": client_id, "approved": int(bool(decision.approved)),
+            "hard_breach": int(bool(getattr(decision, "hard_breach", False))),
+            "reasons": _payload(list(decision.reasons)), "payload": _payload(decision)})
+
+    def append_broker_event(self, client_id: str, kind: str, payload: Any = None,
+                            ts: float | None = None) -> int:
+        return self._insert("broker_events", {"ts": self._ts(ts), "client_id": client_id,
+                                              "kind": kind, "payload": _payload(payload)})
+
+    def append_fill(self, fill: Fill, *, seq: int, quote_amount: Decimal, fee_quote: Decimal) -> int:
+        return self._insert("fills", {
+            "ts": fill.ts, "client_id": fill.client_id, "seq": seq, "symbol": fill.symbol,
+            "side": fill.side.value, "price": _dec(fill.price), "quantity": _dec(fill.quantity),
+            "quote_amount": _dec(quote_amount), "fee": _dec(fill.fee), "fee_asset": fill.fee_asset,
+            "fee_quote": _dec(fee_quote)})
+
+    def append_position_snapshot(self, pos: Position, *, closed_pnl: Decimal | None = None,
+                                 ts: float | None = None) -> int:
+        """Ledger keys in pos.meta (POSITION_LEDGER_KEYS) are stored as Decimal TEXT columns, not in the
+        redacted payload."""
+        meta = {k: v for k, v in pos.meta.items() if k not in POSITION_LEDGER_KEYS}
+        return self._insert("positions_snapshots", {
+            "ts": self._ts(ts), "symbol": pos.symbol, "quantity": _dec(pos.quantity),
+            "avg_price": _dec(pos.avg_price), "realized_pnl": _dec(pos.realized_pnl),
+            "stop_price": _dec(pos.stop_price), "closed_pnl": _dec(closed_pnl),
+            "cost_basis": _dec(pos.meta.get("cost_basis")),
+            "realized_at_open": _dec(pos.meta.get("realized_at_open")), "payload": _payload(meta)})
+
+    def append_killswitch_event(self, engaged: bool, reason: str, actor: str,
+                                ts: float | None = None) -> int:
+        return self._insert("killswitch_events", {"ts": self._ts(ts), "engaged": int(bool(engaged)),
+                                                  "reason": _text(reason), "actor": _text(actor)})
+
+    def append_equity_sod(self, day: str, equity: Decimal, ts: float | None = None) -> bool:
+        """First write for a UTC day wins; later writes for the same day are ignored."""
+        cur = self._conn.execute("INSERT OR IGNORE INTO equity_sod(ts, day, equity) VALUES (?,?,?)",
+                                 (self._ts(ts), day, _dec(equity)))
+        return cur.rowcount == 1
+
+    def append_equity_hwm(self, equity: Decimal, ts: float | None = None) -> int:
+        return self._insert("equity_hwm", {"ts": self._ts(ts), "equity": _dec(equity)})
+
+    def append_error(self, source: str, message: str, payload: Any = None,
+                     ts: float | None = None) -> int:
+        return self._insert("errors", {"ts": self._ts(ts), "source": source,
+                                       "message": _text(message), "payload": _payload(payload)})
+
+    # ---------------------------------------------------------------- intents
+    def append_intent(self, intent: OrderIntent, payload: Any = None, ts: float | None = None) -> bool:
+        """Insert in PROPOSED. Returns False (and writes nothing) if client_id already exists."""
+        ts = self._ts(ts)
+        with self.tx():
+            if self._conn.execute("SELECT 1 FROM order_intents WHERE client_id=?",
+                                  (intent.client_id,)).fetchone():
+                return False
+            self._conn.execute(
+                "INSERT INTO order_intents(client_id, intent_id, signal_id, symbol, side, type,"
+                " quantity, price, stop_price, reduce_only, state, created_at, updated_at, payload)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (intent.client_id, intent.intent_id, intent.signal_id, intent.symbol, intent.side.value,
+                 intent.type.value, _dec(intent.quantity), _dec(intent.price), _dec(intent.stop_price),
+                 int(intent.reduce_only), IntentState.PROPOSED.value, ts, ts, _payload(payload)))
+            self._insert("intent_state_log", {"ts": ts, "client_id": intent.client_id, "from_state": None,
+                                              "to_state": IntentState.PROPOSED.value, "reason": "created"})
+            return True
+
+    def _record(self, r: sqlite3.Row) -> IntentRecord:
+        intent = OrderIntent(
+            symbol=r["symbol"], side=Side(r["side"]), type=OrderType(r["type"]),
+            quantity=Decimal(r["quantity"]), price=_undec(r["price"]), signal_id=r["signal_id"],
+            reduce_only=bool(r["reduce_only"]), stop_price=_undec(r["stop_price"]))
+        if intent.client_id != r["client_id"]:
+            raise StoreError(f"intent row {r['client_id']} does not reproduce its client_id")
+        return IntentRecord(intent, IntentState(r["state"]), r["created_at"], r["updated_at"])
+
+    def get_intent(self, client_id: str) -> IntentRecord | None:
+        r = self._conn.execute("SELECT * FROM order_intents WHERE client_id=?", (client_id,)).fetchone()
+        return None if r is None else self._record(r)
+
+    def intents_in_states(self, states: Iterable[IntentState]) -> list[IntentRecord]:
+        vals = [s.value for s in states]
+        if not vals:
+            return []
+        q = f"SELECT * FROM order_intents WHERE state IN ({','.join('?' for _ in vals)}) ORDER BY created_at, rowid"
+        return [self._record(r) for r in self._conn.execute(q, vals)]
+
+    def set_intent_state(self, client_id: str, new: IntentState, *, expected: IntentState | None = None,
+                         reason: str = "", ts: float | None = None) -> IntentState:
+        """Compare-and-set the intent state. Returns the previous state.
+        Raises IllegalTransition (not in LEGAL_TRANSITIONS) or StaleState (expected mismatch)."""
+        ts = self._ts(ts)
+        with self.tx():
+            rec = self.get_intent(client_id)
+            if rec is None:
+                raise StoreError(f"unknown intent {client_id}")
+            old = rec.state
+            if expected is not None and old is not expected:
+                raise StaleState(f"{client_id}: expected {expected.value}, found {old.value}")
+            if new is old:
+                return old
+            if new not in LEGAL_TRANSITIONS[old]:
+                raise IllegalTransition(f"{client_id}: {old.value} -> {new.value}")
+            cur = self._conn.execute(
+                "UPDATE order_intents SET state=?, updated_at=? WHERE client_id=? AND state=?",
+                (new.value, ts, client_id, old.value))
+            if cur.rowcount != 1:
+                raise StaleState(f"{client_id}: concurrent state change")
+            self._insert("intent_state_log", {"ts": ts, "client_id": client_id, "from_state": old.value,
+                                              "to_state": new.value, "reason": _text(reason)})
+            return old
+
+    # ---------------------------------------------------------------- readers
+    def fill_totals(self, client_id: str) -> FillTotals:
+        rows = self._conn.execute("SELECT quantity, quote_amount, fee FROM fills WHERE client_id=?",
+                                  (client_id,)).fetchall()
+        zero = Decimal(0)
+        return FillTotals(len(rows), sum((Decimal(r[0]) for r in rows), zero),
+                          sum((Decimal(r[1]) for r in rows), zero), sum((Decimal(r[2]) for r in rows), zero))
+
+    def latest_positions(self) -> dict[str, Position]:
+        q = ("SELECT p.* FROM positions_snapshots p JOIN (SELECT symbol, MAX(id) AS id FROM "
+             "positions_snapshots GROUP BY symbol) m ON p.id = m.id")
+        out = {}
+        for r in self._conn.execute(q):
+            meta = json.loads(r["payload"])
+            meta.update({k: Decimal(r[k]) for k in POSITION_LEDGER_KEYS if r[k] is not None})
+            out[r["symbol"]] = Position(r["symbol"], Decimal(r["quantity"]), Decimal(r["avg_price"]),
+                                        Decimal(r["realized_pnl"]), _undec(r["stop_price"]), meta)
+        return out
+
+    def latest_killswitch(self) -> KillswitchEvent | None:
+        r = self._conn.execute("SELECT * FROM killswitch_events ORDER BY id DESC LIMIT 1").fetchone()
+        if r is None:
+            return None
+        if r["engaged"] not in (0, 1):
+            raise StoreError(f"corrupt killswitch row {r['id']}")
+        return KillswitchEvent(bool(r["engaged"]), r["reason"], r["actor"], r["ts"])
+
+    def sod_equity(self, day: str) -> Decimal | None:
+        r = self._conn.execute("SELECT equity FROM equity_sod WHERE day=?", (day,)).fetchone()
+        return None if r is None else Decimal(r[0])
+
+    def equity_hwm(self) -> Decimal | None:
+        vals = [Decimal(r[0]) for r in self._conn.execute("SELECT equity FROM equity_hwm")]
+        return max(vals) if vals else None
+
+    def consecutive_losses(self) -> tuple[int, float | None]:
+        """(number of most recent closed round trips that lost money, ts of the latest loss)."""
+        n, last_ts = 0, None
+        for r in self._conn.execute("SELECT ts, closed_pnl FROM positions_snapshots WHERE closed_pnl "
+                                    "IS NOT NULL ORDER BY id DESC"):
+            if Decimal(r["closed_pnl"]) >= 0:
+                break
+            n += 1
+            last_ts = r["ts"] if last_ts is None else last_ts
+        return n, last_ts
