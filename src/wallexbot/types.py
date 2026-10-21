@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, Decimal
@@ -16,6 +17,25 @@ def D(value) -> Decimal:
     if not d.is_finite():
         raise ValueError(f"non-finite decimal: {value!r}")
     return d
+
+
+def canonical_decimal(value) -> str | None:
+    """Value-canonical fixed-point text: equal numbers give equal strings, whatever their scale.
+
+    0.01, 0.010000 and 1E-2 -> "0.01"; 100 and 1E+2 -> "100"; 0, 0.000 and -0 -> "0".
+    Pure string manipulation of the exact fixed-point form: no Decimal context is involved, so
+    nothing is rounded (Decimal.normalize() would round to the context precision)."""
+    if value is None:
+        return None
+    d = value if isinstance(value, Decimal) else D(value)
+    if not d.is_finite():
+        raise ValueError(f"non-finite decimal: {value!r}")
+    if d.is_zero():
+        return "0"
+    s = format(d, "f")  # exact, never exponent notation
+    if "." in s:
+        s = s.rstrip("0").rstrip(".")
+    return s
 
 
 def round_down(value: Decimal, precision: int) -> Decimal:
@@ -91,11 +111,17 @@ class OrderIntent:
 
     @property
     def intent_id(self) -> str:
-        """Deterministic id: same signal+shape => same id (idempotent)."""
-        key = "|".join(
+        """Deterministic id: same signal + same economic shape => same id (idempotent).
+
+        Numbers are keyed by value, not by spelling (canonical_decimal), so Decimal("0.01") and
+        Decimal("0.010000") give the same id and a resubmission cannot become a second order.
+        stop_price is part of the shape: two exits that differ only in their stop are different
+        orders. The key is a JSON array, so no field value can collide by containing a delimiter."""
+        key = json.dumps(
             [self.signal_id, self.symbol, self.side.value, self.type.value,
-             str(self.quantity), str(self.price), str(self.reduce_only)]
-        )
+             canonical_decimal(self.quantity), canonical_decimal(self.price),
+             canonical_decimal(self.stop_price), bool(self.reduce_only)],
+            separators=(",", ":"))
         return str(uuid.uuid5(_NS, key))
 
     @property

@@ -4,7 +4,7 @@ Status: **planned (Day 2). No backtest has been run, and no results are reported
 
 ## Data
 
-- Source: public 1-minute candles from `udf/history`, aggregated into **closed** 15m and 1h bars (and 4h, aggregated from 1m or derived from 1h). Wallex has no native 15m or 4h series: the documented resolutions 15/240/480/720/2D/3D are not honoured server-side. The aggregate is cross-checked against the native 1h series (resolution `60`) in `data/aggregate.py`.
+- Source: public 1-minute candles from `udf/history`, aggregated into **closed** 15m and 1h bars (and 4h, aggregated from 1m or derived from 1h). Wallex has no native 15m or 4h series: the documented resolutions 15/240/480/720/2D/3D are not honoured server-side. The aggregate is cross-checked against the native 1h series (resolution `60`) in `tests/test_aggregate.py` (`test_1m_to_1h_matches_native_hourly_fixture`, on recorded fixtures), not in `data/aggregate.py`, which does no runtime cross-check.
 - Candle data caveats: the 1m series forward-fills no-trade minutes as zero-volume flat bars; the 1m range cap is about 1500 bars per request; native-60 truncates to about 696 bars; candle volume is in base units.
 - Universe: top 10–15 markets by 24h volume, per `universe.top_n` (default 12).
 - Quality checks (`data/quality.py`): 24/7 time grid, explicit zero-volume policy.

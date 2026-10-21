@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import (ROUND_HALF_EVEN, Context, Decimal, DecimalException, DivisionByZero, Inexact,
+                     InvalidOperation, Overflow, localcontext)
 from typing import Callable
 
 from wallexbot.exchange.base import BrokerOrder, OrderRejected, OrderStatus, RateLimited
@@ -49,12 +50,43 @@ def fee_in_quote(fee: Decimal, fee_asset: str, price: Decimal, base: str, quote:
     raise LedgerError(f"cannot value fee asset {fee_asset!r} in {quote}")
 
 
+# Ledger arithmetic contexts (see apply_fill).
+# _EXACT: every +, -, * on ledger values must be exact. A precision of 1000 digits is far beyond
+#   any real magnitude span, and the Inexact trap turns any rounding into an exception (fail
+#   closed -> the OMS marks the intent NEEDS_REVIEW) instead of a silent residue. Division is never
+#   done in this context (a non-terminating quotient would be computed to 1000 digits and trap).
+# _DIV: the only two divisions (pro-rata cost release on a partial sell, informational avg_price)
+#   are rounded to 28 significant digits, explicitly and independently of the caller's context.
+_EXACT = Context(prec=1000, rounding=ROUND_HALF_EVEN,
+                 traps=[InvalidOperation, DivisionByZero, Overflow, Inexact])
+_DIV = Context(prec=28, rounding=ROUND_HALF_EVEN, traps=[InvalidOperation, DivisionByZero, Overflow])
+
+
 def apply_fill(pos: Position, fill: Fill, quote_amount: Decimal, base: str,
                quote: str) -> tuple[Position, Decimal | None]:
     """Return (new position, closed round-trip P&L if this fill closed the position).
 
-    The exact quote-currency cost basis is carried in pos.meta["cost_basis"]; avg_price is derived
-    from it. A full close releases the whole basis, so a round trip's P&L equals its cash flows."""
+    Exactness argument. The quote-currency cost basis (fees included) is carried in
+    pos.meta["cost_basis"]; avg_price is only derived from it for display. Every addition,
+    subtraction and multiplication runs in _EXACT, so it is exact or raises. The only inexact step
+    is the pro-rata release on a PARTIAL sell, cost * base_out / qty, rounded in _DIV; whatever
+    that rounding gets wrong stays in the remaining basis (cost - released, exact). The fill that
+    takes the position to zero releases the exact remaining basis with no division. Hence, over a
+    round trip, sum(released) == sum(buy costs) exactly, and the closed P&L
+        realized_at_close - realized_at_open == sum(sell proceeds net of quote fees)
+                                                 - sum(buy cost incl. quote fees)
+    exactly: the division residue cancels instead of leaking into P&L (a break-even trade reports
+    exactly 0, never a tiny loss). Partial-sell realized P&L while the position is still open
+    carries the 28-digit rounding; only the closed figure is exact."""
+    try:
+        with localcontext(_EXACT):
+            return _apply_fill_exact(pos, fill, quote_amount, base, quote)
+    except DecimalException as e:
+        raise LedgerError(f"ledger arithmetic not exact: {type(e).__name__}") from e
+
+
+def _apply_fill_exact(pos: Position, fill: Fill, quote_amount: Decimal, base: str,
+                      quote: str) -> tuple[Position, Decimal | None]:
     fee_q = fee_in_quote(fill.fee, fill.fee_asset, fill.price, base, quote)
     base_fee = fill.fee if fill.fee_asset == base else _ZERO
     other_fee = _ZERO if fill.fee_asset == base else fee_q  # quote-denominated cost of a non-base fee
@@ -69,12 +101,14 @@ def apply_fill(pos: Position, fill: Fill, quote_amount: Decimal, base: str,
             cost = _ZERO
         cost += quote_amount + other_fee
         meta["cost_basis"] = cost
-        return Position(pos.symbol, new_qty, cost / new_qty, pos.realized_pnl, pos.stop_price, meta), None
+        return Position(pos.symbol, new_qty, _DIV.divide(cost, new_qty), pos.realized_pnl,
+                        pos.stop_price, meta), None
     base_out = fill.quantity + base_fee
     if base_out > pos.quantity:
         raise LedgerError(f"sell of {base_out} exceeds position {pos.quantity}")
     new_qty = pos.quantity - base_out
-    released = cost if new_qty == 0 else cost * base_out / pos.quantity
+    # Final close: release exactly what is left (no division). Partial: rounded pro-rata share.
+    released = cost if new_qty == 0 else _DIV.divide(cost * base_out, pos.quantity)
     realized = pos.realized_pnl + (quote_amount - other_fee) - released
     if new_qty == 0:
         closed = realized - meta.pop("realized_at_open", _ZERO)
@@ -263,7 +297,7 @@ class OMS:
                     self.store.set_intent_state(cid, target, expected=rec.state,
                                                 reason=f"broker:{order.status.value}", ts=now)
         except Exception as e:
-            self.store.append_error("oms.apply", repr(e), {"client_id": cid, "order": order}, ts=now)
+            self.store.append_error("oms.apply", repr(e), {"client_id": cid, "broker_order": order}, ts=now)
             self._needs_review(cid, f"apply_failed:{type(e).__name__}", now)
 
     @staticmethod

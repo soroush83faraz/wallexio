@@ -5,7 +5,7 @@ Status: specification. Nothing here is implemented or backtested yet (Day 2 of t
 ## Scope
 
 - Spot, long only, USDT quote, top 10–15 markets by 24h volume (`universe.top_n: 12` in config).
-- Bar inputs are **closed** 15m and 1h bars. 15m and 4h are **aggregated from 1m** candles (4h is also derivable from 1h); Wallex has no native 15m or 4h series. The aggregator is cross-checked against the native 1h series (resolution `60`). The forming candle is always dropped.
+- Bar inputs are **closed** 15m and 1h bars. 15m and 4h are **aggregated from 1m** candles (4h is also derivable from 1h); Wallex has no native 15m or 4h series. The aggregator is cross-checked against the native 1h series (resolution `60`) by `tests/test_aggregate.py` (`test_1m_to_1h_matches_native_hourly_fixture`, on recorded fixtures). `data/aggregate.py` itself does not cross-check at runtime. The forming candle is always dropped.
 - The variant **S1** is the breakout strategy below. **S2** = S1 plus a trend filter; it is only a variant, and no ICT-based strategy is included unless the user supplies code.
 - **S0** is the baseline used for comparison. The source plan names it but does not define it; it must be defined before backtesting.
 

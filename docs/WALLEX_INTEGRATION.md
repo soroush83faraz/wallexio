@@ -38,7 +38,7 @@ Only public, unauthenticated GET requests are made in this build, by `exchange/w
 Rules:
 
 - **Never grant Withdraw** on any key. This is a policy rule for this project, not a Wallex-verified permission model. `exchange/auth.py` also refuses any URL whose path mentions `withdraw`.
-- Keys live only in a local `.env` (git-ignored) or the process environment. They are never written to the repo, the audit store, or logs. The store passes every payload and text column through `redact()` (`redact.py`) before writing.
+- Keys live only in a local `.env` (git-ignored) or the process environment. They are never written to the repo, the audit store, or logs. The store passes every payload and free-text column through `redact()` (`redact.py`) before writing. It does not redact identifier columns (client id, signal id, symbol, event kind, error source); it validates them against strict patterns and refuses anything else (see ARCHITECTURE.md, Persistence).
 - `WALLEX_SUB_ACCOUNT_CLIENT_ID` is listed in `.env.example` and maps to the `sub-account-client-id` header in `exchange/auth.py`. Its exact use is not specified in the plan.
 
 ## Contract tests

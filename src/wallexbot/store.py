@@ -1,17 +1,34 @@
 """Append-only SQLite (WAL) audit store.
 
 Invariants:
-- Every table is append-only (UPDATE/DELETE raise via triggers), except the `state` and
-  `updated_at` columns of order_intents. Intent state changes are compare-and-set, checked
-  against LEGAL_TRANSITIONS in Python AND by a trigger, and logged to intent_state_log.
+- Every audit table is append-only, enforced by triggers stored in the database schema (so they
+  apply to every connection, not just this class):
+    * BEFORE UPDATE / BEFORE DELETE triggers raise, except that the `state` and `updated_at`
+      columns of order_intents may change (state changes are compare-and-set, checked against
+      LEGAL_TRANSITIONS in Python AND by a trigger, and logged to intent_state_log);
+    * BEFORE INSERT triggers raise when the new row's PRIMARY KEY or any UNIQUE key already
+      exists. SQLite's REPLACE conflict resolution (INSERT OR REPLACE / REPLACE INTO / upserts)
+      deletes the old row WITHOUT firing DELETE triggers when recursive_triggers is off, so
+      without these an existing row could be silently rewritten. With them, a key conflict
+      aborts before any conflict resolution runs, whatever the OR-clause.
+    * PRAGMA recursive_triggers=ON is also set on this connection, as a second layer (REPLACE
+      deletes then fire the DELETE triggers too); it is per-connection, the INSERT triggers are not.
+  Not covered (by design or impossible in SQLite): appending NEW rows (that is the point of an
+  audit log; e.g. a new killswitch_events row is how the switch is disengaged, and it is logged),
+  and a writer with raw file access who drops the triggers or edits the file.
 - Money/quantity values are Decimal, stored as TEXT (str(Decimal) round-trips exactly).
   Floats are refused at this boundary.
 - Every payload / free-text column passes through redact() before it is written.
+- Identifier columns (client_id, signal_id, symbol, broker event kind, error source) are NOT
+  redacted (that would break idempotency and lookups); they are VALIDATED instead: client_id must
+  match ^wb_[0-9a-f]{32}$, the others ^[A-Za-z0-9_.:-]{1,128}$, and must pass redact() unchanged.
+  A value that fails raises StoreError before anything is written.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -46,6 +63,19 @@ AUDIT_TABLES = ("signals", "risk_decisions", "order_intents", "intent_state_log"
 POSITION_LEDGER_KEYS = ("cost_basis", "realized_at_open")
 _INTENT_IMMUTABLE = ("client_id", "intent_id", "signal_id", "symbol", "side", "type", "quantity",
                      "price", "stop_price", "reduce_only", "created_at", "payload")
+# Every key of every audit table that an insert can conflict on: the rowid (`id` is an alias of
+# it; order_intents has an implicit rowid besides its TEXT primary key), the PRIMARY KEY and every
+# UNIQUE key. The first entry is always the rowid. A BEFORE INSERT trigger per key aborts an
+# insert whose key already exists, which closes the REPLACE-conflict rewrite path.
+_UNIQUE_KEYS: dict[str, tuple[tuple[str, ...], ...]] = {
+    **{t: (("id",),) for t in AUDIT_TABLES},
+    "order_intents": (("rowid",), ("client_id",)),
+    "fills": (("id",), ("client_id", "seq")),
+    "equity_sod": (("id",), ("day",)),
+}
+
+CLIENT_ID_RE = re.compile(r"wb_[0-9a-f]{32}")
+IDENT_RE = re.compile(r"[A-Za-z0-9_.:\-]{1,128}")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals(id INTEGER PRIMARY KEY, ts REAL NOT NULL, signal_id TEXT NOT NULL,
@@ -153,6 +183,23 @@ def _undec(s: str | None) -> Decimal | None:
     return None if s is None else Decimal(s)
 
 
+def _client_id(value: Any) -> str:
+    """client_id is derived from a hash (OrderIntent.client_id), so its shape is fully known."""
+    if not isinstance(value, str) or CLIENT_ID_RE.fullmatch(value) is None:
+        raise StoreError("refusing malformed client_id (expected wb_ + 32 lowercase hex)")
+    return value
+
+
+def _ident(value: Any, what: str) -> str:
+    """Identifier columns are stored verbatim (not redacted), so they must be plainly harmless:
+    a short token of [A-Za-z0-9_.:-] that redact() leaves unchanged (which also refuses any value
+    containing a fragment of a registered secret). The offending value is never echoed."""
+    if not isinstance(value, str) or IDENT_RE.fullmatch(value) is None or redact(value) != value:
+        raise StoreError(f"refusing malformed {what} (expected 1-128 chars of [A-Za-z0-9_.:-], "
+                         "no secret material)")
+    return value
+
+
 def _transition_sql() -> str:
     clauses = []
     for src, dsts in LEGAL_TRANSITIONS.items():
@@ -172,6 +219,7 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA recursive_triggers=ON")  # REPLACE deletes fire DELETE triggers
         self._init_schema()
 
     # ---------------------------------------------------------------- infrastructure
@@ -191,6 +239,25 @@ class Store:
         stmts.append("CREATE TRIGGER IF NOT EXISTS order_intents_transition BEFORE UPDATE OF state ON "
                      f"order_intents WHEN NEW.state IS NOT OLD.state AND NOT ({_transition_sql()}) "
                      "BEGIN SELECT RAISE(ABORT, 'illegal intent state transition'); END;")
+        # The implicit rowid of order_intents is not in _INTENT_IMMUTABLE; changing it with
+        # UPDATE OR REPLACE could delete another intent row through a rowid conflict.
+        stmts.append("CREATE TRIGGER IF NOT EXISTS order_intents_rowid_immutable BEFORE UPDATE ON "
+                     "order_intents WHEN NEW.rowid IS NOT OLD.rowid BEGIN SELECT RAISE(ABORT, "
+                     "'order_intents: rowid may not change'); END;")
+        # REPLACE / upsert guard. BEFORE INSERT triggers run before SQLite resolves a key conflict,
+        # so aborting here means the existing row is never deleted or rewritten.
+        for t, keys in _UNIQUE_KEYS.items():
+            for cols in keys:
+                match = " AND ".join(f"{c} = NEW.{c}" for c in cols)
+                stmts.append(f"CREATE TRIGGER IF NOT EXISTS {t}_no_replace_{'_'.join(cols)} BEFORE INSERT "
+                             f"ON {t} WHEN EXISTS (SELECT 1 FROM {t} WHERE {match}) BEGIN SELECT "
+                             f"RAISE(ABORT, '{t} is append-only: {'/'.join(cols)} already exists'); END;")
+            # In a BEFORE INSERT trigger an auto-assigned rowid reads as -1, so a row stored with a
+            # negative rowid could not be told apart from a fresh insert by the guard above.
+            # Auto-assigned rowids are always positive: refuse explicit negative ones.
+            rid = keys[0][0]
+            stmts.append(f"CREATE TRIGGER IF NOT EXISTS {t}_no_negative_rowid AFTER INSERT ON {t} "
+                         f"WHEN NEW.{rid} < 0 BEGIN SELECT RAISE(ABORT, '{t}: negative rowid'); END;")
         self._conn.executescript("\n".join(stmts))
 
     def close(self) -> None:
@@ -239,26 +306,27 @@ class Store:
     # ---------------------------------------------------------------- append-only writers
     def append_signal(self, signal_id: str, symbol: str, payload: dict | None = None,
                       ts: float | None = None) -> int:
-        return self._insert("signals", {"ts": self._ts(ts), "signal_id": signal_id,
-                                        "symbol": symbol, "payload": _payload(payload)})
+        return self._insert("signals", {"ts": self._ts(ts), "signal_id": _ident(signal_id, "signal_id"),
+                                        "symbol": _ident(symbol, "symbol"), "payload": _payload(payload)})
 
     def append_risk_decision(self, client_id: str, decision: Any, ts: float | None = None) -> int:
         """`decision` is a risk.engine.RiskDecision (approved, reasons, hard_breach)."""
         return self._insert("risk_decisions", {
-            "ts": self._ts(ts), "client_id": client_id, "approved": int(bool(decision.approved)),
+            "ts": self._ts(ts), "client_id": _client_id(client_id), "approved": int(bool(decision.approved)),
             "hard_breach": int(bool(getattr(decision, "hard_breach", False))),
             "reasons": _payload(list(decision.reasons)), "payload": _payload(decision)})
 
     def append_broker_event(self, client_id: str, kind: str, payload: Any = None,
                             ts: float | None = None) -> int:
-        return self._insert("broker_events", {"ts": self._ts(ts), "client_id": client_id,
-                                              "kind": kind, "payload": _payload(payload)})
+        return self._insert("broker_events", {"ts": self._ts(ts), "client_id": _client_id(client_id),
+                                              "kind": _ident(kind, "kind"), "payload": _payload(payload)})
 
     def append_fill(self, fill: Fill, *, seq: int, quote_amount: Decimal, fee_quote: Decimal) -> int:
         return self._insert("fills", {
-            "ts": fill.ts, "client_id": fill.client_id, "seq": seq, "symbol": fill.symbol,
-            "side": fill.side.value, "price": _dec(fill.price), "quantity": _dec(fill.quantity),
-            "quote_amount": _dec(quote_amount), "fee": _dec(fill.fee), "fee_asset": fill.fee_asset,
+            "ts": fill.ts, "client_id": _client_id(fill.client_id), "seq": seq,
+            "symbol": _ident(fill.symbol, "symbol"), "side": fill.side.value, "price": _dec(fill.price),
+            "quantity": _dec(fill.quantity), "quote_amount": _dec(quote_amount), "fee": _dec(fill.fee),
+            "fee_asset": _ident(fill.fee_asset, "fee_asset"),
             "fee_quote": _dec(fee_quote)})
 
     def append_position_snapshot(self, pos: Position, *, closed_pnl: Decimal | None = None,
@@ -267,7 +335,7 @@ class Store:
         redacted payload."""
         meta = {k: v for k, v in pos.meta.items() if k not in POSITION_LEDGER_KEYS}
         return self._insert("positions_snapshots", {
-            "ts": self._ts(ts), "symbol": pos.symbol, "quantity": _dec(pos.quantity),
+            "ts": self._ts(ts), "symbol": _ident(pos.symbol, "symbol"), "quantity": _dec(pos.quantity),
             "avg_price": _dec(pos.avg_price), "realized_pnl": _dec(pos.realized_pnl),
             "stop_price": _dec(pos.stop_price), "closed_pnl": _dec(closed_pnl),
             "cost_basis": _dec(pos.meta.get("cost_basis")),
@@ -279,32 +347,45 @@ class Store:
                                                   "reason": _text(reason), "actor": _text(actor)})
 
     def append_equity_sod(self, day: str, equity: Decimal, ts: float | None = None) -> bool:
-        """First write for a UTC day wins; later writes for the same day are ignored."""
-        cur = self._conn.execute("INSERT OR IGNORE INTO equity_sod(ts, day, equity) VALUES (?,?,?)",
-                                 (self._ts(ts), day, _dec(equity)))
-        return cur.rowcount == 1
+        """First write for a UTC day wins; later writes for the same day are ignored (False).
+
+        Check-then-insert inside one IMMEDIATE transaction (not INSERT OR IGNORE: the
+        no-replace trigger aborts a duplicate key whatever the OR-clause)."""
+        day = _ident(day, "day")
+        value = _dec(equity)
+        with self.tx():
+            if self._conn.execute("SELECT 1 FROM equity_sod WHERE day=?", (day,)).fetchone():
+                return False
+            self._insert("equity_sod", {"ts": self._ts(ts), "day": day, "equity": value})
+            return True
 
     def append_equity_hwm(self, equity: Decimal, ts: float | None = None) -> int:
         return self._insert("equity_hwm", {"ts": self._ts(ts), "equity": _dec(equity)})
 
     def append_error(self, source: str, message: str, payload: Any = None,
                      ts: float | None = None) -> int:
-        return self._insert("errors", {"ts": self._ts(ts), "source": source,
+        return self._insert("errors", {"ts": self._ts(ts), "source": _ident(source, "source"),
                                        "message": _text(message), "payload": _payload(payload)})
 
     # ---------------------------------------------------------------- intents
     def append_intent(self, intent: OrderIntent, payload: Any = None, ts: float | None = None) -> bool:
-        """Insert in PROPOSED. Returns False (and writes nothing) if client_id already exists."""
+        """Insert in PROPOSED. Returns False (and writes nothing) if client_id already exists.
+
+        Idempotency is an explicit existence check inside one IMMEDIATE transaction followed by a
+        plain INSERT; it never relies on OR IGNORE / OR REPLACE conflict semantics. Identifiers
+        are validated first; an invalid one raises StoreError and nothing is written."""
+        cid = _client_id(intent.client_id)
+        signal_id = _ident(intent.signal_id, "signal_id")
+        symbol = _ident(intent.symbol, "symbol")
         ts = self._ts(ts)
         with self.tx():
-            if self._conn.execute("SELECT 1 FROM order_intents WHERE client_id=?",
-                                  (intent.client_id,)).fetchone():
+            if self._conn.execute("SELECT 1 FROM order_intents WHERE client_id=?", (cid,)).fetchone():
                 return False
             self._conn.execute(
                 "INSERT INTO order_intents(client_id, intent_id, signal_id, symbol, side, type,"
                 " quantity, price, stop_price, reduce_only, state, created_at, updated_at, payload)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (intent.client_id, intent.intent_id, intent.signal_id, intent.symbol, intent.side.value,
+                (cid, intent.intent_id, signal_id, symbol, intent.side.value,
                  intent.type.value, _dec(intent.quantity), _dec(intent.price), _dec(intent.stop_price),
                  int(intent.reduce_only), IntentState.PROPOSED.value, ts, ts, _payload(payload)))
             self._insert("intent_state_log", {"ts": ts, "client_id": intent.client_id, "from_state": None,
