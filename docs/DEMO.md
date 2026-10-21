@@ -24,7 +24,7 @@ Status: **partly runnable.** The full demo replays one **stored** decision lifec
 .venv/bin/pytest -q
 ```
 
-Expected on the code at this commit: 784 tests pass.
+Expected on the code at this commit: 826 tests pass.
 
 ## Works now: scripted mock round trip
 

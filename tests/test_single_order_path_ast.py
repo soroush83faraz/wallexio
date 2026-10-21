@@ -50,6 +50,9 @@ ALLOWED_DYNAMIC: dict[tuple[str, tuple[str, ...], str], int] = {
     ("store.py", ("_jsonable",), "getattr"): 1,                       # dataclass field values
     ("store.py", ("Store", "append_risk_decision"), "getattr"): 1,    # optional decision.hard_breach
     ("redact.py", ("Secret", "__init__"), "__setattr__"): 1,          # frozen Secret's own slot
+    ("redact.py", ("_is_numpy_number",), "getattr"): 1,               # numpy scalar type lookup
+    ("redact.py", (), "vars"): 1,                         # logging.LogRecord field names
+    ("redact.py", ("RedactingFilter", "filter"), "vars"): 1,          # scrub extra= LogRecord fields
 }
 
 BROKER_MODULES = frozenset({"wallexbot.exchange.mock_wallex", "wallexbot.exchange.base", "wallexbot.exchange"})
