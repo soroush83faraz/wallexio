@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Day-1 skeleton. Modules marked *planned* do not exist at commit `0e7ee8e`.
+Status: Day-1 mock vertical slice. Implemented: `exchange/` (wallex_public, mock_wallex, ratelimit, auth), `data/`, `store.py`, `risk/`, `oms.py`, `redact.py`, `config.py`, `types.py`, `pipeline.py`. Not yet written: `strategy/`, `guardian/`, `backtest/` and `ai/` (empty packages), `cli.py`, `bot/`, and the shadow and private broker clients. Modules marked *planned* do not exist yet.
 
 ## Module diagram
 
@@ -50,12 +50,12 @@ Status: Day-1 skeleton. Modules marked *planned* do not exist at commit `0e7ee8e
    backtest/ (planned) replays the same strategy and risk code on stored data.
 ```
 
-Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, intent ids), `redact.py` (planned, secret scrubbing before any write).
+Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, intent ids), `redact.py` (secret scrubbing before any write).
 
 ## Single-order-path rule
 
 - Only `OMS.submit()` may call `broker.submit_order`.
-- Planned enforcement: `tests/test_single_order_path_ast.py` parses the source with `ast` and fails if any other call site exists.
+- Enforced by `tests/test_single_order_path_ast.py`, which parses the source with `ast` and fails if any other call site exists.
 - Every order, including reduce-only exits and guardian flattens, goes through the OMS state machine.
 - Intent ids are deterministic (uuid5 over signal, symbol, side, type, quantity, price, reduce-only flag). Resubmitting the same intent produces the same client id.
 - After a POST timeout the intent moves to `unknown_pending`. It is **never resubmitted**. It is reconciled by looking up the client id and open orders.

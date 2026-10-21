@@ -1,14 +1,14 @@
 # Backtest
 
-Status: **planned (Day 2). No backtest has been run, and no results are reported.** The backtest engine (`backtest/`) does not exist at commit `0e7ee8e`.
+Status: **planned (Day 2). No backtest has been run, and no results are reported.** The backtest engine (`backtest/`) does not exist yet (the package is empty).
 
 ## Data
 
 - Source: public 1-minute candles from `udf/history`, aggregated into **closed** 15m and 1h bars (and 4h, aggregated from 1m or derived from 1h). Wallex has no native 15m or 4h series: the documented resolutions 15/240/480/720/2D/3D are not honoured server-side. The aggregate is cross-checked against the native 1h series (resolution `60`) in `data/aggregate.py`.
 - Candle data caveats: the 1m series forward-fills no-trade minutes as zero-volume flat bars; the 1m range cap is about 1500 bars per request; native-60 truncates to about 696 bars; candle volume is in base units.
 - Universe: top 10–15 markets by 24h volume, per `universe.top_n` (default 12).
-- Quality checks (planned `data/quality.py`): 24/7 time grid, explicit zero-volume policy.
-- Depth and trade data come from the recorder, which samples every 10–15 s into rotating files (planned). Recorder history only exists from the time recording started, so cost estimates based on it cover a shorter period than candle data.
+- Quality checks (`data/quality.py`): 24/7 time grid, explicit zero-volume policy.
+- Depth and trade data come from the recorder (`data/recorder.py`), which samples every 15 s by default (`interval_s`) into daily-rotating files. Recorder history only exists from the time recording started, so cost estimates based on it cover a shorter period than candle data.
 
 ## Engine assumptions
 

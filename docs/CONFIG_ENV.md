@@ -1,6 +1,6 @@
 # Configuration and environment
 
-Status: `config.py` and `config/default.yaml` exist. CLI flags and the `doctor` command are planned.
+Status: `config.py`, `config/default.yaml` and `exchange/auth.py` exist. The CLI (`cli.py`, including the `--arm-live` flag) and the `doctor` command are planned.
 
 ## Environment variable names
 
@@ -8,10 +8,10 @@ Names only. Values never go in the repo. Local values belong in a git-ignored `.
 
 | Name | Used by | Status in this build |
 |---|---|---|
-| `WALLEX_API_KEY_READ` | Read-only Wallex key | Not read by any code yet. No credentials are used or requested. |
-| `WALLEX_API_KEY_TRADE` | Read + Trade Wallex key | Not read by any code yet. Required for live arming (planned check). |
-| `WALLEX_SUB_ACCOUNT_CLIENT_ID` | Sub-account identifier | Not read by any code yet. Use not specified in the plan. |
-| `WALLEX_ARM_LIVE` | Live arming | **Enforced** by `config.py`: must equal `YES_I_UNDERSTAND` when `mode: live`. |
+| `WALLEX_API_KEY_READ` | Read-only Wallex key | Named in `exchange/auth.py` (`READ_KEY_ENV`) but not read by any runtime path yet. No credentials are used or requested. |
+| `WALLEX_API_KEY_TRADE` | Read + Trade Wallex key | **Read** by `assert_live_armed()` in `exchange/auth.py`, which `load_config()` calls when `mode: live`. Only presence and header-safe format are checked. No order can be sent yet (no private client). |
+| `WALLEX_SUB_ACCOUNT_CLIENT_ID` | Sub-account identifier | Named in `exchange/auth.py` (`SUB_ACCOUNT_ENV`) but not read by any runtime path yet. Use not specified in the plan. |
+| `WALLEX_ARM_LIVE` | Live arming | **Enforced** by `config.py` and `assert_live_armed()`: must equal `YES_I_UNDERSTAND` (exact match) when `mode: live`. |
 | `ANTHROPIC_API_KEY` | Optional AI advisor | Not read by any code yet. The advisor is off in the critical path by default. |
 
 ## Config keys
@@ -46,14 +46,14 @@ Risk limits are explained in RISK.md. Strategy parameters are not in the config 
 
 ## Live arming conditions
 
-Live arming is enforced in code by `load_config(..., cli_armed=...)` (config loading) and `exchange.auth.assert_live_armed` (before any private call).
+Live arming is enforced in code by `load_config(..., cli_armed=...)` (config loading), which calls `exchange.auth.assert_live_armed(env, cli_armed)` when `mode: live`. That check requires the environment variable, `cli_armed is True` and `WALLEX_API_KEY_TRADE`.
 
 Live trading needs **all** of the following:
 
 1. `mode: live` in the config file. The default is `mock`.
 2. `WALLEX_ARM_LIVE=YES_I_UNDERSTAND` in the environment. **Enforced now** by `config.py`; without it, loading fails with `ConfigError`.
-3. A `--arm-live` command-line flag. **Planned** (`cli.py`, not yet present).
-4. `WALLEX_API_KEY_TRADE` present. **Planned check.**
+3. A `--arm-live` command-line flag. The code check is **implemented**: `load_config(..., cli_armed=True)` is required. The flag itself is **planned** (`cli.py`, not yet present), so today only tests and callers can pass `cli_armed=True`.
+4. `WALLEX_API_KEY_TRADE` present. **Enforced now** by `assert_live_armed()` (presence and format only).
 5. `doctor` reporting green. **Planned.**
 6. Explicit go-ahead from the user, given in the conversation. This is a process rule, not code.
 
