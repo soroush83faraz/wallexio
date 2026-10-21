@@ -24,6 +24,7 @@ from typing import Callable, Iterable
 from wallexbot.exchange.base import (OPEN_STATUSES, Balance, BrokerOrder, BrokerTimeout, DuplicateClientId,
                                      FeeRates, OrderRejected, OrderStatus, RateLimited)
 from wallexbot.exchange.ratelimit import TokenBucket
+from wallexbot.exchange.wallex_public import Depth
 from wallexbot.types import OrderType, Quote, Side, SymbolRules, round_down
 
 FAULT_MODES = frozenset({"fill", "partial", "rest", "reject", "timeout_after_accept",
@@ -112,6 +113,11 @@ class MockWallex:
     def quote(self, symbol: str) -> Quote:
         bids, asks, ts = self._books[symbol]
         return Quote(symbol, bids[0][0], asks[0][0], ts)
+
+    def depth(self, symbol: str) -> Depth:
+        """Visible order book, same shape as WallexPublicClient.depth (best levels first)."""
+        bids, asks, ts = self._books[symbol]
+        return Depth(symbol, tuple(asks), tuple(bids), ts)
 
     def fee_rates(self) -> FeeRates:
         return FeeRates(self.maker_rate, self.taker_rate)

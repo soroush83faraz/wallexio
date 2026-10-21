@@ -55,6 +55,14 @@ ALLOWED_DYNAMIC: dict[tuple[str, tuple[str, ...], str], int] = {
     ("redact.py", ("RedactingFilter", "filter"), "vars"): 1,          # scrub extra= LogRecord fields
 }
 
+# (file, enclosing scope) -> number of `self.oms.submit(...)` calls allowed outside the order-path
+# modules. Reviewed: the guardian's flatten procedure must place reduce-only exits, and does so
+# through OMS.submit (risk check, kill-switch gate, idempotent client_id, audit), never through
+# the broker. The receiver must literally be `self.oms`; any other submit-like call is flagged.
+ALLOWED_OMS_SUBMIT: dict[tuple[str, tuple[str, ...]], int] = {
+    ("guardian/flatten.py", ("_Flattener", "_place_exit")): 1,
+}
+
 BROKER_MODULES = frozenset({"wallexbot.exchange.mock_wallex", "wallexbot.exchange.base", "wallexbot.exchange"})
 BROKER_NAMES = frozenset({"MockWallex", "mock_wallex"})
 SUBMIT_LIKE = re.compile(r"submit|^(place|send|create|new|post)_?orders?$", re.IGNORECASE)
@@ -126,6 +134,7 @@ def scan_source(source: str, rel: str) -> tuple[list[Violation], list[tuple[str,
     out: list[Violation] = []
     sends: list[tuple[str, tuple[str, ...], int]] = []
     dyn_used: dict[tuple[str, tuple[str, ...], str], list[int]] = {}
+    oms_submits: dict[tuple[str, tuple[str, ...]], list[int]] = {}
     seen_pieces: set[int] = set()
 
     def flag(node, rule, detail):
@@ -209,12 +218,20 @@ def scan_source(source: str, rel: str) -> tuple[list[Violation], list[tuple[str,
             if isinstance(node, ast.Call):
                 f = node.func
                 name = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
-                if name and SUBMIT_LIKE.search(name):
+                on_self_oms = isinstance(f, ast.Attribute) and isinstance(f.value, ast.Attribute) and \
+                    f.value.attr == "oms" and isinstance(f.value.value, ast.Name) and f.value.value.id == "self"
+                if name == "submit" and on_self_oms and (rel, scope) in ALLOWED_OMS_SUBMIT:
+                    oms_submits.setdefault((rel, scope), []).append(node.lineno)
+                elif name and SUBMIT_LIKE.search(name):
                     flag(node, "broker", f"calls submit-like {name}()")
         for child in ast.iter_child_nodes(node):
             visit(child, scope)
 
     visit(tree, ())
+    for key, lines in oms_submits.items():
+        if len(lines) > ALLOWED_OMS_SUBMIT[key]:
+            out.append(Violation(rel, lines[-1], "broker", f"oms.submit called {len(lines)}x in {key[1]} "
+                                 f"(allowed {ALLOWED_OMS_SUBMIT[key]})"))
     for key, lines in dyn_used.items():
         if len(lines) > ALLOWED_DYNAMIC.get(key, 0):
             out.append(Violation(rel, lines[-1], "dynamic",
@@ -310,6 +327,20 @@ ROGUE = {
     "keyword named submit_order": ("strategy/rogue.py", "def run(f, b):\n    f(submit_order=b)\n"),
     "import alias submit_order": ("strategy/rogue.py", "from x import y as submit_order\n"),
     "define submit_order outside exchange": ("risk/rogue.py", "def submit_order(**kw):\n    pass\n"),
+    "oms.submit in another guardian scope": ("guardian/flatten.py",
+                                             "class _Flattener:\n    def other(self, i):\n"
+                                             "        self.oms.submit(i)\n"),
+    "oms.submit twice in the allowed scope": ("guardian/flatten.py",
+                                              "class _Flattener:\n    def _place_exit(self, i):\n"
+                                              "        self.oms.submit(i)\n        self.oms.submit(i)\n"),
+    "broker.submit in the allowed scope": ("guardian/flatten.py",
+                                           "class _Flattener:\n    def _place_exit(self, i):\n"
+                                           "        self.broker.submit(i)\n"),
+    "aliased oms in the allowed scope": ("guardian/flatten.py",
+                                         "class _Flattener:\n    def _place_exit(self, o, i):\n"
+                                         "        o.submit(i)\n"),
+    "oms.submit in guardian monitor": ("guardian/monitor.py",
+                                       "class Guardian:\n    def tick(self, i):\n        self.oms.submit(i)\n"),
 }
 
 
@@ -319,6 +350,24 @@ def test_scanner_flags_bypass(label):
     violations, sends = scan_source(src, rel)
     assert violations, f"bypass not flagged: {label}"
     assert sends == [] or label.startswith(("second call", "alias inside"))
+
+
+def test_oms_submit_allow_list_entries_are_all_used_exactly():
+    """The guardian's exit placement is the one reviewed OMS.submit caller outside the order path."""
+    seen: dict = {}
+    for (rel, scope), n in ALLOWED_OMS_SUBMIT.items():
+        tree = ast.parse((SRC / rel).read_text())
+
+        def visit(node, sc):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                sc = sc + (node.name,)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "submit":
+                seen[(rel, sc)] = seen.get((rel, sc), 0) + 1
+            for c in ast.iter_child_nodes(node):
+                visit(c, sc)
+
+        visit(tree, ())
+    assert seen == ALLOWED_OMS_SUBMIT
 
 
 def test_scanner_accepts_the_legitimate_send_site():
