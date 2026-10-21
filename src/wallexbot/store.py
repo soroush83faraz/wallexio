@@ -57,9 +57,11 @@ LEGAL_TRANSITIONS: dict[IntentState, frozenset[IntentState]] = {
 }
 
 APPEND_ONLY_TABLES = ("signals", "risk_decisions", "intent_state_log", "broker_events", "fills",
-                      "positions_snapshots", "killswitch_events", "equity_sod", "equity_hwm", "errors")
+                      "positions_snapshots", "killswitch_events", "equity_sod", "equity_hwm", "errors",
+                      "audit_events")
 AUDIT_TABLES = ("signals", "risk_decisions", "order_intents", "intent_state_log", "broker_events",
-                "fills", "positions_snapshots", "killswitch_events", "equity_sod", "equity_hwm", "errors")
+                "fills", "positions_snapshots", "killswitch_events", "equity_sod", "equity_hwm", "errors",
+                "audit_events")
 POSITION_LEDGER_KEYS = ("cost_basis", "realized_at_open")
 _INTENT_IMMUTABLE = ("client_id", "intent_id", "signal_id", "symbol", "side", "type", "quantity",
                      "price", "stop_price", "reduce_only", "created_at", "payload")
@@ -105,6 +107,9 @@ CREATE TABLE IF NOT EXISTS equity_sod(id INTEGER PRIMARY KEY, ts REAL NOT NULL,
 CREATE TABLE IF NOT EXISTS equity_hwm(id INTEGER PRIMARY KEY, ts REAL NOT NULL, equity TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY, ts REAL NOT NULL, source TEXT NOT NULL,
     message TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS audit_events(id INTEGER PRIMARY KEY, ts REAL NOT NULL, actor TEXT NOT NULL,
+    kind TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS audit_events_actor_kind ON audit_events(actor, kind, id);
 """
 
 
@@ -367,6 +372,16 @@ class Store:
         return self._insert("errors", {"ts": self._ts(ts), "source": _ident(source, "source"),
                                        "message": _text(message), "payload": _payload(payload)})
 
+    def append_audit_event(self, actor: str, kind: str, payload: Any = None,
+                           ts: float | None = None) -> int:
+        """Generic append-only decision / health record (guardian decisions, component heartbeats)."""
+        return self._insert("audit_events", {"ts": self._ts(ts), "actor": _ident(actor, "actor"),
+                                             "kind": _ident(kind, "kind"), "payload": _payload(payload)})
+
+    def heartbeat(self, component: str = "strategy", ts: float | None = None) -> int:
+        """A long-running loop proves it is alive; the guardian reads latest_event_ts(component, 'heartbeat')."""
+        return self.append_audit_event(component, "heartbeat", None, ts=ts)
+
     # ---------------------------------------------------------------- intents
     def append_intent(self, intent: OrderIntent, payload: Any = None, ts: float | None = None) -> bool:
         """Insert in PROPOSED. Returns False (and writes nothing) if client_id already exists.
@@ -463,6 +478,24 @@ class Store:
         if r["engaged"] not in (0, 1):
             raise StoreError(f"corrupt killswitch row {r['id']}")
         return KillswitchEvent(bool(r["engaged"]), r["reason"], r["actor"], r["ts"])
+
+    def latest_event_ts(self, actor: str, kind: str) -> float | None:
+        r = self._conn.execute("SELECT ts FROM audit_events WHERE actor=? AND kind=? ORDER BY id DESC LIMIT 1",
+                               (actor, kind)).fetchone()
+        return None if r is None else float(r[0])
+
+    def audit_events(self, actor: str | None = None, kind: str | None = None) -> list[dict[str, Any]]:
+        q, args = "SELECT * FROM audit_events WHERE 1=1", []
+        if actor is not None:
+            q, args = q + " AND actor=?", [*args, actor]
+        if kind is not None:
+            q, args = q + " AND kind=?", [*args, kind]
+        out = []
+        for r in self._conn.execute(q + " ORDER BY id", args):
+            d = dict(r)
+            d["payload"] = json.loads(d["payload"])
+            out.append(d)
+        return out
 
     def sod_equity(self, day: str) -> Decimal | None:
         r = self._conn.execute("SELECT equity FROM equity_sod WHERE day=?", (day,)).fetchone()

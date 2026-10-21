@@ -31,6 +31,7 @@ def _populate(store):
     store.append_equity_sod("2025-01-01", D("100"))
     store.append_equity_hwm(D("100"))
     store.append_error("test", "boom")
+    store.append_audit_event("pytest", "test", {"k": "v"})
     return i
 
 

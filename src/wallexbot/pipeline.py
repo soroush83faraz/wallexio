@@ -41,6 +41,18 @@ def snapshot_account(store: Store, balances: dict[str, Balance], quote_ccy: str,
                         hwm_equity=hwm, consecutive_losses=losses, last_loss_ts=last_loss, marks=marks)
 
 
+def build_mock_broker(cfg: Config, clock, balances: dict[str, Decimal] | None = None):
+    """Demo wiring for processes outside the order path (the guardian CLI) that may not import the
+    broker modules themselves. Returns (MockWallex with a BTC book, {symbol: SymbolRules})."""
+    sym = f"BTC{cfg.quote_currency}"
+    rules = {sym: SymbolRules(sym, "BTC", cfg.quote_currency, amount_precision=6, price_precision=2)}
+    broker = MockWallex(rules.values(), clock=clock,
+                        balances=balances if balances is not None else {cfg.quote_currency: Decimal("10000")},
+                        maker_rate=cfg.maker_rate, taker_rate=cfg.taker_rate)
+    broker.set_price(sym, Decimal("60000.00"), Decimal("60010.00"))
+    return broker, rules
+
+
 def run_scripted_trade(db_path: str = ":memory:", config: Config | None = None) -> dict[str, Any]:
     """signal -> risk -> OMS -> MockWallex fill -> P&L, for one round trip on BTCUSDT.
 
