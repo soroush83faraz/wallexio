@@ -4,7 +4,8 @@ Status: **planned (Day 2). No backtest has been run, and no results are reported
 
 ## Data
 
-- Source: public 1-minute candles from `udf/history`, aggregated into **closed** 15m and 1h bars. The aggregate is cross-checked against native 15m and 60m resolutions (planned `data/aggregate.py`).
+- Source: public 1-minute candles from `udf/history`, aggregated into **closed** 15m and 1h bars (and 4h, aggregated from 1m or derived from 1h). Wallex has no native 15m or 4h series: the documented resolutions 15/240/480/720/2D/3D are not honoured server-side. The aggregate is cross-checked against the native 1h series (resolution `60`) in `data/aggregate.py`.
+- Candle data caveats: the 1m series forward-fills no-trade minutes as zero-volume flat bars; the 1m range cap is about 1500 bars per request; native-60 truncates to about 696 bars; candle volume is in base units.
 - Universe: top 10–15 markets by 24h volume, per `universe.top_n` (default 12).
 - Quality checks (planned `data/quality.py`): 24/7 time grid, explicit zero-volume policy.
 - Depth and trade data come from the recorder, which samples every 10–15 s into rotating files (planned). Recorder history only exists from the time recording started, so cost estimates based on it cover a shorter period than candle data.
@@ -46,7 +47,7 @@ A passing backtest alone is not evidence for live trading.
 
 - No results exist. Nothing in this repo supports a claim of profitability.
 - Fees, spreads, and minimum notional are placeholders or unverified.
-- Candle volume semantics are unknown; only relative volume is used.
+- Candle volume is in base units; only relative volume is used.
 - Fill and impact models are approximations. Real fills may differ, especially for market orders in thin books.
 - Universe selection by current 24h volume can introduce look-ahead bias. The universe at each point in time must use only data available then.
 - Delisted or suspended markets may be missing from the data.

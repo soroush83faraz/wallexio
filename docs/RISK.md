@@ -26,6 +26,10 @@ Values from `config/default.yaml`. Percentages are of equity; order value is in 
 
 The 60-minute cooldown after consecutive losses is stated in the plan but is not a config key yet.
 
+## Rate limiting
+
+Wallex documents 20 order-creates per 10 s [from docs]. Our client-side `TokenBucket` (`exchange/ratelimit.py`) is deliberately 10 per 10 s (half) as a safety margin.
+
 ## Check order
 
 The risk engine runs ordered, fail-closed checks. The first failure rejects the order:

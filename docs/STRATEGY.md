@@ -5,7 +5,7 @@ Status: specification. Nothing here is implemented or backtested yet (Day 2 of t
 ## Scope
 
 - Spot, long only, USDT quote, top 10–15 markets by 24h volume (`universe.top_n: 12` in config).
-- Bar inputs are **closed** 15m and 1h bars, aggregated from 1m candles and cross-checked against native 15m and 60m resolutions. The forming candle is always dropped.
+- Bar inputs are **closed** 15m and 1h bars. 15m and 4h are **aggregated from 1m** candles (4h is also derivable from 1h); Wallex has no native 15m or 4h series. The aggregator is cross-checked against the native 1h series (resolution `60`). The forming candle is always dropped.
 - The variant **S1** is the breakout strategy below. **S2** = S1 plus a trend filter; it is only a variant, and no ICT-based strategy is included unless the user supplies code.
 - **S0** is the baseline used for comparison. The source plan names it but does not define it; it must be defined before backtesting.
 
@@ -16,7 +16,7 @@ An entry signal requires all of the following on a closed bar:
 1. **Donchian-20 breakout**: close breaks above the 20-bar Donchian high. Exact bar convention is to be pinned in code.
 2. **EMA50 trend filter**: trend side relative to EMA50, as implemented in code.
 3. **Rate of change (ROC) acceleration**: momentum is increasing. Threshold: not yet specified.
-4. **Volume confirmation**: relative volume ≥ 1.8× the median. Only relative volume is used, because candle volume semantics on Wallex are unverified.
+4. **Volume confirmation**: relative volume ≥ 1.8× the median. Only relative volume is used. Candle volume is in base units (see WALLEX_INTEGRATION.md).
 5. **ATR band**: breakout distance is within an ATR-based band. Band width: not yet specified.
 6. **Not-late filter**: the price has not already run too far from the breakout level. Threshold: not yet specified.
 7. **Regime tightening**: entry criteria are stricter in an unfavourable regime. Regime definition: not yet specified.

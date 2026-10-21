@@ -46,6 +46,8 @@ Risk limits are explained in RISK.md. Strategy parameters are not in the config 
 
 ## Live arming conditions
 
+Live arming is enforced in code by `load_config(..., cli_armed=...)` (config loading) and `exchange.auth.assert_live_armed` (before any private call).
+
 Live trading needs **all** of the following:
 
 1. `mode: live` in the config file. The default is `mock`.
