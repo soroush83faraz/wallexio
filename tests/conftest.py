@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from wallexbot import redact as R
 from wallexbot.config import load_config
 from wallexbot.exchange.mock_wallex import MockClock, MockWallex
 from wallexbot.oms import OMS
@@ -16,6 +17,15 @@ from wallexbot.types import SymbolRules
 D = Decimal
 SYM = "BTCUSDT"
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def isolated_secret_registry():
+    """redact's secret registry is process-global; keep one test's fake keys from redacting another's data."""
+    saved = set(R._SECRETS)
+    R._reset_registry()
+    yield
+    R._reset_registry(saved)
 
 
 @pytest.fixture
