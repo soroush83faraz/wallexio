@@ -2,7 +2,7 @@
 
 A long-only, spot momentum-breakout trading agent for the Wallex exchange, quoted in USDT.
 
-**Status: mock vertical slice, strategy, backtest engine, guardian and history downloader are implemented and unit-tested. Not runnable end to end: there is no CLI or bot loop. Live trading is disabled by default.**
+**Status: mock vertical slice, strategy, backtest engine, guardian and history downloader are implemented and unit-tested. Not runnable end to end: there is a CLI (`python -m wallexbot demo|backtest|doctor|guardian`) but no bot loop. Live trading is disabled by default.**
 
 This is a hackathon submission. It does not promise profit. "No trades" is a valid outcome of the strategy, and no backtest results are reported here: the backtest engine exists, but **no backtest has been run on real data yet**.
 
@@ -30,7 +30,7 @@ Implemented and unit-tested (against the mock or synthetic data; nothing has run
 - Redaction, auth and host guards, live-arming checks (`redact.py`, `exchange/auth.py`, `config.py`).
 - A scripted mock round trip, `wallexbot.pipeline.run_scripted_trade` (see [docs/DEMO.md](docs/DEMO.md)).
 
-**Not implemented**: the CLI (and `--arm-live` flag, `doctor` command), the bot loop that wires strategy to the OMS, `ShadowBroker`, the AI advisor. **Not done**: any backtest run, any shadow run, any check of the private client against Wallex.
+**Not implemented**: the bot loop that wires strategy to the OMS, `ShadowBroker`, the AI advisor. The CLI exists, but `--arm-live` is refused on every command: live is not available in this build. **Not done**: any validated backtest (one exploratory train/validation run with placeholder costs exists under `reports/`), any shadow run, any check of the private client against Wallex.
 
 ## Quickstart
 

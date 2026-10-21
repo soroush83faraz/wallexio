@@ -1,8 +1,8 @@
 # Backtest
 
-Status: **the engine, cost model, metrics, splits, sensitivity and report writer are implemented and unit-tested. No backtest has been run on real data, and no results are reported.** There is no runner script or CLI yet; a run would be driven from Python. Nothing here supports a claim of profitability.
+Status: **the engine, cost model, metrics, splits, sensitivity, report writer and a runner/CLI (`python -m wallexbot backtest`) are implemented and unit-tested. One exploratory run on train+validation of the local 45-day history exists under `reports/` (placeholder costs, unvalidated; see "Runner and CLI").** The test segment has not been evaluated. Nothing here supports a claim of profitability.
 
-Modules (`backtest/`): `engine.py` (bar-by-bar simulator), `costs.py`, `metrics.py`, `splits.py`, `sensitivity.py`, `report.py`.
+Modules (`backtest/`): `engine.py` (bar-by-bar simulator), `costs.py`, `metrics.py`, `splits.py`, `sensitivity.py`, `report.py`, `runner.py` (grid driver, used by `cli.py`).
 
 ## Data
 
@@ -34,6 +34,16 @@ These are design choices, not measured facts:
 - Positions open at the end of the data are sold at the last close with full costs and flagged `end_of_data`. Equity is marked at closes; loss limits are checked at closes only.
 - Runs are deterministic and carry an `inputs_hash` and `result_hash`.
 
+## Runner and CLI
+
+`python -m wallexbot backtest [--history-dir data/history] [--out-dir reports] [--symbols ...] [--workers 4]` loads the 1m history, aggregates closed 15m bars (bars with absent minutes are kept, flagged and counted), builds `SymbolRules` (from `tests/fixtures/markets.json` where listed; otherwise derived: price precision = finest tick seen in the data, amount precision = smallest whose lot is worth <= 0.15 USDT at the median price; both are guesses, not exchange facts) and runs S0/S1 x E1-E4 x taker 0.0035 (placeholder) / 0.002 / 0.001 (ASSUMED scenarios, real fee unverified) on **train and validation only**, plus an equal-weight buy-and-hold benchmark, the S1 cost-gate feasibility scan and a +/-20% sensitivity of the top S1 candidate (train and validation separately). Outputs: `reports/backtest_grid.{json,md}`, `reports/backtest_top_{train,validation}.{json,md}`. Deterministic; the worker count does not change the output.
+
+- Fixed split (code constants, not tuned): 50% train / 25% validation / remainder test by 15m bar time, 300-bar embargo (= the strategies' indicator window) between segments, 300-bar warm-up taken from the embargo, entries from the segment's first bar. Warm-up equity points are trimmed before metrics.
+- Engine cooldown hook: 3 consecutive losses block entries for 60 min; per symbol 8 bars after an exit (2 after a win). The "same breakout level after a stop-out" and "trend intact" refinements of `CooldownTracker` are not modelled.
+- The runner rounds trailing/breakeven stop and take-profit levels DOWN to the price tick (`TickExit`). Without it, levels computed with Decimal division carry ~60 digits and the engine's exact cost-attribution check aborts the run (an engine latent issue; engine and strategy code were not edited).
+- The runner never calls `TestSetGuard`. `python -m wallexbot backtest --final-test --params-file frozen.json [--ledger PATH]` is the single-use test evaluation: it refuses without a valid params file (exit 2), validates the file, consumes the guard (ledger default `reports/test_set_ledger.jsonl`) before running, writes `reports/backtest_final_test.{json,md}`, and a second use is refused (exit 3). Frozen file: `{"strategy": "S0|S1", "exit": "E1..E4", "taker_rate": "0.0035", "momentum_params": {...}, "exit_params": {...}}`. Thresholds for judging the result must be written down before it is used.
+- `--arm-live` is refused on every command; live is not available in this build.
+
 ## Splits and the test set
 
 - `chronological_split` lays out `[train][embargo][validation][embargo][test]` on the bar timestamps. Defaults in code: 60% train, 20% validation, remainder test, with an embargo of at least the longest indicator lookback. These fractions are code defaults, not a committed decision: the actual boundaries must be fixed and committed **before** any run. Changing them after results are seen invalidates the split. `walk_forward` windows also exist.
@@ -52,7 +62,7 @@ All of the following are required. The plan does not give numeric pass threshold
 1. Backtest on train and validation completed with frozen code and config.
 2. Single test-set evaluation completed and recorded, with thresholds fixed in advance.
 3. Shadow run of 24–48 hours using `ShadowBroker`, which logs decisions and sends no orders (**not implemented**).
-4. Doctor green (`wallexbot.doctor.run_doctor` exists; no CLI yet).
+4. Doctor green (`python -m wallexbot doctor`, needs `WALLEX_API_KEY_READ`; not yet run against Wallex).
 5. Explicit go-ahead from the user.
 6. Credentials and arming conditions met (see CONFIG_ENV.md).
 
