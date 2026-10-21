@@ -11,3 +11,13 @@ logs/
 runs/
 .pytest_cache/
 *.egg-info/
+# secrets: any env-file variant, keys/certs; only the names-only template is tracked
+.env.*
+!.env.example
+*.pem
+*.key
+*.sqlite
+*.sqlite3
+# local agent/tool state (worktree copies, per-user settings that may hold tokens)
+.claude/worktrees/
+.claude/settings.local.json
