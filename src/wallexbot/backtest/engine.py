@@ -23,6 +23,8 @@ B. INTRABAR of ts (each open position, incl. ones entered at this open):
                                    reached a target, the STOP is assumed first (conservative).
    - high >= target             -> target(s) fill at their price, ascending.
    Nothing else is known about the path inside a bar.
+   Position state handed to `targets()` during the bar is the state at the OPEN: on the entry bar
+   `highest_high_since_entry` is the entry bar's open (its high is unknown until the close).
 C. CLOSE of ts: marks <- close; highest high and bars_held updated; equity marked to market
    (no liquidation cost) and appended to the curve; HWM/day loss/drawdown evaluated (RiskConfig
    percentages; trading day = UTC calendar day, start-of-day equity = equity at the previous
@@ -32,28 +34,47 @@ C. CLOSE of ts: marks <- close; highest high and bars_held updated; equity marke
    engine time stop, and finally `signal_engine.evaluate` on the CLOSED bar for every symbol
    without a position; a signal is queued for the next bar's open.
 
-Strategies and exit policies receive a read-only view whose last element is the bar that just
-closed; indexing beyond it raises IndexError. End of data: open positions are sold at their last
-close with full costs and flagged `end_of_data`; the final equity point is replaced by the
-post-liquidation value. The run is deterministic and carries `inputs_hash` and `result_hash`.
+Strategies and exit policies receive a TUPLE holding only the last `lookback_bars` bars up to and
+including the bar that just closed (`bars_window`): no reference to the full series or to any
+later bar exists in what they are handed, so no attribute or index can reach the future. The
+default (400) covers S1's `MomentumParams.history_bars` (300, itself >= min_bars 120) and E1-E4's
+indicator windows; `run_backtest` refuses a lookback shorter than the `history_bars` a component
+declares (`component.params.history_bars` or `component.history_bars`). Building a window is a
+bounded tuple slice, O(lookback) per call, never O(len(series)).
+
+Price levels. Every stop/target the engine stores is on the symbol's price tick
+(`price_precision`): the signal's initial stop is rounded DOWN (R never shrinks, so sizing is not
+more aggressive than the strategy asked); a policy's `update_stop` is rounded UP (a long's stop
+only gets tighter), except when rounding alone would lift it to or above the close it was decided
+on (raw < close <= rounded), in which case it is rounded DOWN so a tick cannot trigger an exit the
+policy did not ask for; stops still only ratchet up. Take-profit levels are rounded UP (the market
+must reach at least the requested level; the fill is at that tick-valid level).
+
+Money is exact: notional, fees, spread/impact attribution, cash, equity and P&L sums are computed
+in `costs.EXACT` (1000 digits, Inexact trapped), so `net == gross - fees - spread - impact` holds
+to the last digit for every valid input; the engine still asserts it. Only ratios (impact, breach
+percentages, sizing divisions, r_multiple) round, in a 60-digit context.
+
+End of data: open positions are sold at their last close with full costs and flagged
+`end_of_data`; the final equity point is replaced by the post-liquidation value. The run is
+deterministic and carries `inputs_hash` and `result_hash`.
 """
 from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence as SequenceABC
 from dataclasses import asdict, dataclass, field, is_dataclass
 from decimal import Decimal, localcontext
 from typing import Any, Callable, Mapping, Sequence
 
-from wallexbot.backtest.costs import CostModel, FillCost, round_up
+from wallexbot.backtest.costs import EXACT, CostModel, FillCost, round_up
 from wallexbot.config import RiskConfig
 from wallexbot.data.candles import Candle
 from wallexbot.strategy.contract import ExitDecision, ExitPolicy, PositionState, Signal, SignalEngine
 from wallexbot.strategy.sizing import min_notional_for, size_position
 from wallexbot.types import SymbolRules, canonical_decimal, round_down
 
-ENGINE_VERSION = "bt-0.1"
+ENGINE_VERSION = "bt-0.2"   # 0.2: tick-quantized stops/targets, exact money, open-only entry-bar state
 _ZERO = Decimal(0)
 _HUNDRED = Decimal(100)
 _DAY = 86400
@@ -66,7 +87,7 @@ class BacktestParams:
     time_stop_bars: int | None = None        # engine-level time stop (policies may have their own)
     trade_start_ts: int | None = None        # signals on bars before this are ignored (warm-up)
     min_depth_multiple: Decimal = Decimal(5)  # used only if a depth proxy is ever supplied
-    lookback_bars: int | None = None         # max bars handed to strategy/policy (None = all)
+    lookback_bars: int = 400                 # max bars handed to strategy/policy (>= their history_bars)
 
 
 @dataclass(frozen=True)
@@ -142,29 +163,28 @@ class BacktestResult:
 
 
 # ---------------------------------------------------------------- helpers
-class BarsView(SequenceABC):
-    """Read-only window bars[start:end] of a list; nothing at or after `end` is reachable."""
-    __slots__ = ("_bars", "_start", "_end")
+def bars_window(bars: tuple[Candle, ...], i: int, lookback: int) -> tuple[Candle, ...]:
+    """The closed bars a strategy may see at bar index i: a NEW immutable tuple of at most
+    `lookback` bars ending with bars[i]. It holds no reference to the series it was cut from."""
+    return tuple(bars[max(0, i + 1 - lookback):i + 1])
 
-    def __init__(self, bars: list[Candle], end: int, start: int = 0):
-        self._bars, self._start, self._end = bars, start, end
 
-    def __len__(self) -> int:
-        return self._end - self._start
+def BarsView(bars: Sequence[Candle], end: int, start: int = 0) -> tuple[Candle, ...]:  # noqa: N802
+    """Deprecated name kept for old callers: the tuple bars[start:end] (a copy, nothing beyond)."""
+    return tuple(bars[start:end])
 
-    def __getitem__(self, k):
-        n = self._end - self._start
-        if isinstance(k, slice):
-            return [self._bars[self._start + i] for i in range(*k.indices(n))]
-        if k < 0:
-            k += n
-        if not 0 <= k < n:
-            raise IndexError("bar index out of the visible (closed) range")
-        return self._bars[self._start + k]
 
-    def __iter__(self):
-        for i in range(self._start, self._end):
-            yield self._bars[i]
+def declared_history_bars(component: Any) -> int:
+    """Bars of history a strategy/exit component says it reads (`.params.history_bars` or
+    `.history_bars`); 0 when it declares nothing."""
+    for get in (lambda c: c.params.history_bars, lambda c: c.history_bars):
+        try:
+            value = get(component)
+        except AttributeError:
+            continue
+        if value is not None:
+            return int(value)
+    return 0
 
 
 def to_canonical(obj: Any) -> Any:
@@ -304,9 +324,22 @@ class _Sim:
     def event(self, ts, symbol, kind, detail=""):
         self.events.append(Event(ts, symbol, kind, detail))
 
-    def view(self, s: str, i: int) -> BarsView:
-        lb = self.p.lookback_bars
-        return BarsView(self.bars[s], i + 1, 0 if lb is None else max(0, i + 1 - lb))
+    def view(self, s: str, i: int) -> tuple[Candle, ...]:
+        return bars_window(self.bars[s], i, self.p.lookback_bars)
+
+    def tick_down(self, s: str, price: Any) -> Decimal:
+        return round_down(Decimal(price), self.rules[s].price_precision)
+
+    def tick_up(self, s: str, price: Any) -> Decimal:
+        return round_up(Decimal(price), self.rules[s].price_precision)
+
+    def policy_stop(self, s: str, raw: Any, close: Decimal) -> Decimal:
+        """A policy's stop on the tick: UP (tighter), unless rounding alone lifts it to the close."""
+        raw = Decimal(raw)
+        q = self.tick_up(s, raw)
+        if raw < close <= q:
+            q = self.tick_down(s, raw)
+        return q
 
     def liquidity(self, s: str, i: int) -> Decimal | None:
         """Notional volume of the last bar CLOSED before bar i (never bar i itself)."""
@@ -342,8 +375,9 @@ class _Sim:
             qty, reason = pos.qty, reason + "+dust"  # never leave an unsellable remainder
         cost = self.cm.fill("SELL", ref, qty, liquidity, rules.price_precision)
         f = self._record(ts, pos.symbol, "SELL", kind, reason, ref, qty, cost)
-        self.cash += cost.notional - cost.fee
-        pos.qty -= qty
+        with localcontext(EXACT):
+            self.cash += cost.notional - cost.fee
+            pos.qty -= qty
         pos.exits.append(f)
         if pos.qty == 0:
             self._close(ts, pos, reason, end_of_data=(kind == "end_of_data"))
@@ -351,13 +385,14 @@ class _Sim:
     def _close(self, ts: int, pos: _Pos, reason: str, end_of_data: bool) -> None:
         e = pos.entry_fill
         legs = tuple(pos.exits)
-        gross = sum((x.qty * x.ref_price for x in legs), _ZERO) - e.qty * e.ref_price
-        fees = e.fee + sum((x.fee for x in legs), _ZERO)
-        spread = e.spread_cost + sum((x.spread_cost for x in legs), _ZERO)
-        impact = e.impact_cost + sum((x.impact_cost for x in legs), _ZERO)
-        net = sum((x.notional - x.fee for x in legs), _ZERO) - (e.notional + e.fee)
-        if net != gross - fees - spread - impact:
-            raise RuntimeError("cost attribution identity broken")
+        with localcontext(EXACT):   # exact: a rounding here raises Inexact instead of hiding a residue
+            gross = sum((x.qty * x.ref_price for x in legs), _ZERO) - e.qty * e.ref_price
+            fees = e.fee + sum((x.fee for x in legs), _ZERO)
+            spread = e.spread_cost + sum((x.spread_cost for x in legs), _ZERO)
+            impact = e.impact_cost + sum((x.impact_cost for x in legs), _ZERO)
+            net = sum((x.notional - x.fee for x in legs), _ZERO) - (e.notional + e.fee)
+            if net != gross - fees - spread - impact:
+                raise RuntimeError("cost attribution identity broken")
         rpu = e.price - pos.initial_stop
         self.trades.append(Trade(
             symbol=pos.symbol, signal_id=pos.signal.signal_id, signal_ts=pos.signal.bar_ts,
@@ -387,15 +422,19 @@ class _Sim:
             return self.event(ts, s, "entry_rejected", "max_open_positions")
         if self.cooldown is not None and self.cooldown(s, ts, tuple(self.trades)):
             return self.event(ts, s, "entry_rejected", "cooldown")
-        if bar.open <= sig.stop_price:
+        stop = self.tick_down(s, sig.stop_price)   # on the tick; DOWN keeps R >= the strategy's R
+        if stop <= 0:
+            return self.event(ts, s, "entry_rejected", "stop_below_one_tick")
+        if bar.open <= stop:
             return self.event(ts, s, "entry_rejected", "open_at_or_below_stop")
-        held = sum((p.qty * self.price_now(sym, ts) for sym, p in self.positions.items()), _ZERO)
-        equity = self.cash + held
+        with localcontext(EXACT):
+            held = sum((p.qty * self.price_now(sym, ts) for sym, p in self.positions.items()), _ZERO)
+            equity = self.cash + held
         headroom = equity * self.risk.max_exposure_pct / _HUNDRED - held
         rules, liq = self.rules[s], self.liquidity(s, i)
 
         def size(px: Decimal):
-            return size_position(equity, px, sig.stop_price, rules, self.risk, self.cash, self.cm.taker_rate,
+            return size_position(equity, px, stop, rules, self.risk, self.cash, self.cm.taker_rate,
                                  None, sig.score, min_depth_multiple=self.p.min_depth_multiple,
                                  exposure_headroom=headroom)
 
@@ -409,12 +448,14 @@ class _Sim:
         c2 = self.cm.fill("BUY", bar.open, r2.qty, liq, rules.price_precision)
         if c2.price > c1.price or c2.notional + c2.fee > self.cash:
             raise RuntimeError("sizing monotonicity broken")  # cannot happen: impact is monotone in qty
-        if c2.price <= sig.stop_price:
+        if c2.price <= stop:
             return self.event(ts, s, "entry_rejected", "fill_at_or_below_stop")
         f = self._record(ts, s, "BUY", "entry", "signal", bar.open, r2.qty, c2)
-        self.cash -= c2.notional + c2.fee
+        with localcontext(EXACT):
+            self.cash -= c2.notional + c2.fee
+        # At the open only the open is known: the entry bar's high is folded in at its close.
         self.positions[s] = _Pos(symbol=s, signal=sig, entry_ts=ts, entry_fill=f, qty=r2.qty,
-                                 initial_stop=sig.stop_price, stop=sig.stop_price, highest_high=bar.high)
+                                 initial_stop=stop, stop=stop, highest_high=bar.open)
         if r2.reasons:
             self.event(ts, s, "entry_sized", ",".join(r2.reasons))
 
@@ -426,7 +467,7 @@ class _Sim:
             return self.sell(ts, pos, pos.qty, bar.open, "stop", "stop_gap", liq)
         targets = []
         if self.targets_fn is not None:
-            targets = sorted(((Decimal(p), Decimal(f), str(r)) for p, f, r in self.targets_fn(self.state(pos))
+            targets = sorted(((self.tick_up(s, p), Decimal(f), str(r)) for p, f, r in self.targets_fn(self.state(pos))
                               if str(r) not in pos.targets_hit), key=lambda t: (t[0], t[2]))
         for price, frac, reason in [t for t in targets if bar.open >= t[0]]:
             self.take(ts, pos, price, frac, reason, liq)
@@ -452,7 +493,7 @@ class _Sim:
         self.sell(ts, pos, qty, price, "target", reason, liq)
 
     # ---------------------------------------------------------- phase C
-    def apply_decision(self, ts: int, pos: _Pos, d: ExitDecision) -> None:
+    def apply_decision(self, ts: int, pos: _Pos, d: ExitDecision, close: Decimal) -> None:
         if d.action == "hold":
             return
         if d.action == "exit_all":
@@ -462,8 +503,10 @@ class _Sim:
                 raise ValueError(f"exit_partial fraction out of range: {d.fraction}")
             self.pending_exits[pos.symbol] = (d.fraction, d.reason or "exit_partial")
         elif d.action == "update_stop":
-            if d.new_stop is not None and d.new_stop > pos.stop:  # ratchet up only
-                pos.stop = d.new_stop
+            if d.new_stop is not None:
+                new = self.policy_stop(pos.symbol, d.new_stop, close)
+                if new > pos.stop:  # ratchet up only
+                    pos.stop = new
         else:
             raise ValueError(f"unknown exit action {d.action!r}")
 
@@ -504,8 +547,9 @@ class _Sim:
             if pos is not None:
                 pos.highest_high = max(pos.highest_high, bar.high)
                 pos.bars_held += 1
-        pv = sum((p.qty * self.marks[s] for s, p in self.positions.items()), _ZERO)
-        equity = self.cash + pv
+        with localcontext(EXACT):
+            pv = sum((p.qty * self.marks[s] for s, p in self.positions.items()), _ZERO)
+            equity = self.cash + pv
         self.curve.append(EquityPoint(ts, equity, self.cash, pv))
         self.last_equity = equity
         self.hwm = max(self.hwm, equity)
@@ -526,7 +570,7 @@ class _Sim:
             pos = self.positions.get(s)
             if pos is None or s in self.pending_exits:
                 continue
-            self.apply_decision(ts, pos, self.xp.on_bar(self.state(pos), self.view(s, i)))
+            self.apply_decision(ts, pos, self.xp.on_bar(self.state(pos), self.view(s, i)), self.bars[s][i].close)
             tsb = self.p.time_stop_bars
             if tsb is not None and pos.bars_held >= tsb and s not in self.pending_exits:
                 self.pending_exits[s] = (None, "engine_time_stop")
@@ -570,9 +614,11 @@ def _validate(bars_by_symbol, rules, initial_equity, params) -> dict[str, list[C
         raise ValueError("initial_equity must be positive")
     if params.bar_interval_s <= 0:
         raise ValueError("bar_interval_s must be positive")
+    if not isinstance(params.lookback_bars, int) or params.lookback_bars < 1:
+        raise ValueError("lookback_bars must be a positive int")
     out = {}
     for s in sorted(bars_by_symbol):
-        bs = list(bars_by_symbol[s])
+        bs = tuple(bars_by_symbol[s])
         if s not in rules:
             raise ValueError(f"no SymbolRules for {s}")
         if any(b.ts <= a.ts for a, b in zip(bs, bs[1:])):
@@ -602,6 +648,9 @@ def run_backtest(bars_by_symbol: Mapping[str, Sequence[Candle]], signal_engine: 
                  rules: Mapping[str, SymbolRules], initial_equity: Decimal,
                  params: BacktestParams | None = None, *, cooldown: Cooldown | None = None) -> BacktestResult:
     params = params or BacktestParams()
+    need = max(declared_history_bars(signal_engine), declared_history_bars(exit_policy))
+    if isinstance(params.lookback_bars, int) and params.lookback_bars < need:
+        raise ValueError(f"lookback_bars {params.lookback_bars} < the {need} bars of history a component reads")
     with localcontext() as ctx:
         ctx.prec = 60
         bars = _validate(bars_by_symbol, rules, initial_equity, params)

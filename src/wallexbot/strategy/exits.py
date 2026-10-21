@@ -50,6 +50,10 @@ class ExitParams:
     partial_r: Decimal = Decimal("1")          # E4: sell partial_fraction at +1R
     partial_fraction: Decimal = Decimal("0.5")
     fee_rate: Decimal = Decimal("0.0035")      # E4 breakeven+fees stop; placeholder, unverified
+    # E4: extra room for the exit's own price give-up (half spread + impact) on the breakeven stop,
+    # in bps of the stop. 20 = the backtest's default 7.5 bps half spread + 12.5 bps impact
+    # allowance. Callers derive it from their cost model: CostModel.exit_cost_bps(...).
+    breakeven_buffer_bps: Decimal = Decimal("20")
     false_breakout_bars: int = 2               # E4: close < breakout_level within this many bars
     time_stop_bars: int = 16                   # E4 time stop
     time_stop_only_without_partial: bool = True  # E4: a trade that already paid +1R is left to trail
@@ -63,6 +67,14 @@ class ExitParams:
             raise ValueError("periods must be >= 1")
         if self.fee_rate < 0 or self.fee_rate >= 1:
             raise ValueError("fee_rate out of range")
+        if not (0 <= self.breakeven_buffer_bps < 10000):
+            raise ValueError("breakeven_buffer_bps out of range")
+
+    @property
+    def history_bars(self) -> int:
+        """Most bars any E1-E4 rule reads (the caller must hand at least this many)."""
+        return max(self.atr_period * self.indicator_window_mult + 1, self.ema_period * self.indicator_window_mult,
+                   self.roc_period + 1, self.volume_lookback + 2)
 
 
 # ---------------------------------------------------------------- indicators (Decimal, local)
@@ -184,14 +196,19 @@ class MomentumFailure(_Policy):
 
 class Hybrid(_Policy):
     """E4 (pre-registered leader): hard stop; sell partial_fraction at +1R, then stop to
-    breakeven+fees and chandelier-trail the rest; E3 failure exit; false-breakout exit when a
+    breakeven+fees(+exit-cost buffer) and chandelier-trail the rest; E3 failure exit; false-breakout exit when a
     close is back below breakout_level within false_breakout_bars; time stop."""
     name = "E4"
 
     def breakeven_stop(self, state: PositionState) -> Decimal:
-        f = self.params.fee_rate
-        # sell price whose proceeds net of the sell fee repay the buy cost incl. its fee
-        return state.entry_price * (1 + f) / (1 - f)
+        """Stop level S such that a sale triggered at S, filled up to `breakeven_buffer_bps` below S
+        and charged the sell fee, repays the buy cost incl. its fee:
+            S * (1 - buffer) * (1 - f) >= entry * (1 + f).
+        A gap below S still fills at the (lower) open: the buffer covers spread/impact, not gaps.
+        The caller puts S on the price tick (the backtest rounds a stop UP)."""
+        p = self.params
+        f, buffer = p.fee_rate, p.breakeven_buffer_bps / 10000
+        return state.entry_price * (1 + f) / ((1 - f) * (1 - buffer))
 
     def targets(self, state):
         r = _r(state)

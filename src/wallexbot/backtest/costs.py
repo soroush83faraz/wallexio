@@ -14,7 +14,11 @@ that CLOSED before the fill (never the fill bar itself). A missing or zero proxy
 
 Attribution is exact: spread_cost = qty * ref * half_spread; impact_cost = |qty * (price - ref)|
 - spread_cost (so it also absorbs price rounding). Hence for a round trip
-net P&L == frictionless P&L - fees - spread_cost - impact_cost, to the last digit.
+net P&L == frictionless P&L - fees - spread_cost - impact_cost, to the last digit. The money
+products (notional, fee, spread_cost, impact_cost) are computed in `EXACT`, a 1000-digit context
+that TRAPS Inexact: they are products/sums of finite decimals, so any rounding would be a bug and
+raises instead of silently breaking the identity. Only the impact ratio (a division) and the price
+quantization round, and they happen before, in the caller's context.
 
 Conservative choices / unverified Wallex facts:
 - taker_rate 0.0035 is a PLACEHOLDER (config `fees.taker_rate`), not a verified Wallex fee.
@@ -27,13 +31,18 @@ Conservative choices / unverified Wallex facts:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
+from decimal import (ROUND_CEILING, ROUND_HALF_EVEN, Context, Decimal, DivisionByZero, Inexact, InvalidOperation,
+                     Overflow, localcontext)
 
 from wallexbot.strategy.contract import MarketContext
 from wallexbot.types import round_down
 
 _BPS = Decimal(10000)
 _ZERO = Decimal(0)
+# Exact money arithmetic (same convention as the OMS ledger): +, -, * of finite decimals never
+# round at 1000 digits for any real magnitude span, and the Inexact trap turns a rounding into an
+# exception. Never divide or quantize inside it.
+EXACT = Context(prec=1000, rounding=ROUND_HALF_EVEN, traps=[InvalidOperation, DivisionByZero, Overflow, Inexact])
 
 
 def round_up(value: Decimal, precision: int) -> Decimal:
@@ -91,10 +100,20 @@ class CostModel:
                 price = round_down(price, price_precision)
         if price <= 0:
             raise ValueError("non-positive fill price after costs")
-        notional = qty * price
-        spread_cost = qty * ref_price * hs
-        impact_cost = abs(notional - qty * ref_price) - spread_cost
-        return FillCost(price, notional, notional * self.taker_rate, spread_cost, impact_cost)
+        with localcontext(EXACT):
+            notional = qty * price
+            spread_cost = qty * ref_price * hs
+            impact_cost = abs(notional - qty * ref_price) - spread_cost
+            fee = notional * self.taker_rate
+        return FillCost(price, notional, fee, spread_cost, impact_cost)
+
+    def exit_cost_bps(self, order_notional: Decimal | None = None, bar_notional: Decimal | None = None) -> Decimal:
+        """Estimated price give-up of a taker SELL, in bps of the reference price: half spread plus
+        impact (the cap when the order or liquidity is unknown). Use it to derive
+        `ExitParams.breakeven_buffer_bps` from the same cost model the backtest charges."""
+        if order_notional is None:
+            return self.half_spread_bps + self.impact_cap_bps
+        return self.half_spread_bps + self.impact_fraction(order_notional, bar_notional) * _BPS
 
     def market_context(self) -> MarketContext:
         """What a signal engine is told about costs: full spread and the worst-case impact."""

@@ -19,6 +19,9 @@ One tick:
      on `mismatch_confirm_ticks` consecutive ticks            -> kill switch + needs_review
      (exchange wins: nothing in the ledger is "fixed"; flatten sizes from exchange balances)
    - no fresh quote for > max_data_age_s                     -> kill switch (freeze entries)
+     (a quote dated > max_quote_future_skew_s after the clock is invalid, never fresh; freshness
+     is clamped to now, so a bogus future timestamp or a backward clock step cannot mask a
+     frozen feed)
    - no fresh quote for > stale_action_after_s (120 s)       -> per config: hold, or flatten
    - strategy heartbeat older than heartbeat_timeout_s       -> kill switch
    - breach evaluation error                                 -> kill switch (fail closed)
@@ -50,6 +53,9 @@ class GuardianConfig:
     max_data_age_s: float | None = None         # None: risk.config.max_data_age_s (30 s)
     stale_action_after_s: float = 120.0
     stale_action: str = "hold"                  # "hold" | "flatten"
+    # A quote stamped more than this far AFTER the guardian's clock (bad data, ms-vs-s, a clock
+    # step) is invalid: not fresh, not used for marking. Freshness never exceeds "now".
+    max_quote_future_skew_s: float = 5.0
     heartbeat_component: str = "strategy"
     heartbeat_timeout_s: float = 60.0
     # Balance mismatch tolerance per base asset: max(abs_units x smallest amount step,
@@ -64,6 +70,8 @@ class GuardianConfig:
     def __post_init__(self) -> None:
         if self.stale_action not in ("hold", "flatten"):
             raise ValueError(f"stale_action must be 'hold' or 'flatten', not {self.stale_action!r}")
+        if not self.max_quote_future_skew_s >= 0:
+            raise ValueError("max_quote_future_skew_s must be >= 0")
 
 
 @dataclass
@@ -87,6 +95,7 @@ class Guardian:
                              else risk.config.max_data_age_s)
         self.started_at = float(clock())
         self._last_fresh: dict[str, float] = {}
+        self._future_logged: set[str] = set()
         self._mismatch_streak: dict[str, int] = {}
         self._reviewed: frozenset[str] = frozenset()
         self._last_logged: tuple | None = None
@@ -104,7 +113,9 @@ class Guardian:
             rep.conditions.append("open_orders_unavailable")
             open_orders = []
         positions = self.oms.positions()
-        quotes = self._quotes(now)
+        quotes, future_dated = self._quotes(now)
+        if future_dated:
+            rep.conditions.append("future_quote_ts:" + ",".join(future_dated))
         rules = self.risk.rules
 
         held = sorted(s for s, r in rules.items()
@@ -188,18 +199,35 @@ class Guardian:
                            config=self.cfg.flatten, clock=self.clock, sleep=self.sleep, account=account,
                            reason=reason, depth_fn=self.depth_fn)
 
-    def _quotes(self, now: float) -> dict[str, Any]:
-        out = {}
+    def _quotes(self, now: float) -> tuple[dict[str, Any], list[str]]:
+        """Quotes usable for marking, and the symbols whose quote was dated in the future.
+
+        Freshness is clamped to `now`: a quote up to `max_quote_future_skew_s` ahead counts as
+        fresh as of now; one further ahead is invalid (not fresh, not used to mark). Values kept
+        from earlier ticks are clamped too, so a backward clock step cannot leave a symbol "fresh"
+        in the future and hide a frozen feed."""
+        out, future = {}, []
+        for sym in list(self._last_fresh):
+            self._last_fresh[sym] = min(self._last_fresh[sym], now)
         for sym in self.risk.rules:
             try:
                 q = self.broker.quote(sym)
             except Exception as e:
                 self._error("guardian.monitor", f"quote {sym} failed: {e!r}", now)
                 continue
+            ts = float(q.ts)
+            if not ts <= now + self.cfg.max_quote_future_skew_s:   # also rejects NaN
+                future.append(sym)
+                if sym not in self._future_logged:
+                    self._future_logged.add(sym)
+                    self._error("guardian.monitor", f"quote {sym} dated {ts} is ahead of the clock {now}; "
+                                "treated as missing", now)
+                continue
+            self._future_logged.discard(sym)
             out[sym] = q
             if q.bid > 0 and q.ask >= q.bid:
-                self._last_fresh[sym] = max(self._last_fresh.get(sym, float("-inf")), float(q.ts))
-        return out
+                self._last_fresh[sym] = max(self._last_fresh.get(sym, float("-inf")), min(ts, now))
+        return out, future
 
     def _equity(self, balances, quotes, positions) -> tuple[Decimal, list[str]]:
         cash = balances.get(self.quote_ccy)

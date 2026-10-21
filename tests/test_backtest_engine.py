@@ -1,16 +1,19 @@
 """Backtest engine tests. Every expected number is computed by hand in the comments."""
+import gc
+import hashlib
 import random
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Context, Decimal, Inexact, InvalidOperation, localcontext
 
 import pytest
 
 from wallexbot.backtest.costs import CostModel
-from wallexbot.backtest.engine import BacktestParams, BarsView, loss_streak_cooldown, run_backtest
+from wallexbot.backtest.engine import BacktestParams, bars_window, loss_streak_cooldown, run_backtest
 from wallexbot.config import RiskConfig
 from wallexbot.data.candles import Candle
 from wallexbot.strategy.contract import ExitDecision, Signal
-from wallexbot.strategy.exits import Hybrid
+from wallexbot.strategy.exits import Hybrid, make_policy
+from wallexbot.strategy.momentum import MomentumSignalEngine
 from wallexbot.types import SymbolRules
 
 D = Decimal
@@ -98,9 +101,10 @@ def test_strategy_only_sees_closed_bars():
 
 
 def test_bars_view_cannot_reach_the_future():
-    data = [flat(i) for i in range(5)]
-    v = BarsView(data, 3)
-    assert len(v) == 3 and v[-1] is data[2] and list(v) == data[:3] and v[1:] == data[1:3]
+    data = tuple(flat(i) for i in range(5))
+    v = bars_window(data, 2, 400)
+    assert isinstance(v, tuple) and len(v) == 3 and v[-1] is data[2] and v[1:] == data[1:3]
+    assert bars_window(data, 4, 2) == data[3:5]           # at most `lookback` bars
     with pytest.raises(IndexError):
         v[3]
     with pytest.raises(IndexError):
@@ -351,3 +355,193 @@ def test_integration_invariants_with_e4_and_costs():
         assert t.entry_ts > t.signal_ts
     assert all(p.cash >= 0 for p in res.equity_curve)
     assert res.final_equity == res.initial_equity + sum(t.net_pnl for t in res.trades)
+
+
+# ------------------------------------------------------------------ verifier regressions (Day-2 review)
+TICK = D("0.0001")
+
+
+def _on_tick(x):
+    return x % TICK == 0
+
+
+_EXACT = Context(prec=1000, traps=[InvalidOperation, Inexact])   # the test's own arithmetic cannot round
+
+
+def _identity_and_ticks(res, initial):
+    with localcontext(_EXACT):
+        for t in res.trades:
+            assert t.net_pnl == t.gross_pnl - t.fees - t.spread_cost - t.impact_cost   # exact, not approximate
+            assert sum(x.qty for x in t.exits) == t.qty
+            assert _on_tick(t.initial_stop)
+        for f in res.fills:
+            if f.kind in ("stop", "target"):
+                assert _on_tick(f.ref_price), f
+        assert res.final_equity == initial + sum((t.net_pnl for t in res.trades), D(0))
+    assert all(p.cash >= 0 for p in res.equity_curve)
+
+
+def test_e4_breakeven_stop_digits_cannot_break_the_cost_identity():
+    """Verifier repro: E4's breakeven stop entry*(1+f)/(1-f) has ~60 significant digits; the
+    stop fill's qty*ref was rounded by the 60-digit context and the identity check crashed."""
+    bars = [flat(0, 100), flat(1, 100), bar(2, 100, 115, 100, 112), bar(3, 112, 113, 95, 101), flat(4, 101)]
+    res = run(bars, Scripted({(A, 1): (90, "0.9", 50)}), Hybrid(), cost=CostModel())
+    (t,) = res.trades
+    assert [x.reason for x in t.exits] == ["partial_take_profit", "stop"]
+    _identity_and_ticks(res, D(10000))
+
+
+def _fuzz_bars(rng, n, start):
+    out, p = [], start
+    for i in range(n):
+        o = p * (1 + (rng.gauss(0, 0.03) if rng.random() < 0.05 else rng.gauss(0, 0.002)))
+        moves = [o * (1 + rng.gauss(0, 0.01)) for _ in range(3)]
+        c = moves[-1]
+        h = max([o] + moves) * (1 + abs(rng.gauss(0, 0.003)))
+        lo = min([o] + moves) * (1 - abs(rng.gauss(0, 0.003)))
+
+        def q(x):
+            return D(str(round(max(x, 0.0002), 4)))
+
+        O, H, L, C = q(o), q(h), q(lo), q(c)
+        out.append(Candle(i * 900, O, max(H, O, C), min(L, O, C), C, D(str(round(rng.random() * 1000, 3)))))
+        p = max(c, 0.001)
+    return out
+
+
+class _HashSignals:
+    """Deterministic pseudo-random signals with arbitrary-precision stops (like the verifier's b2.py)."""
+    params = None
+
+    def __init__(self, seed, p):
+        self.seed, self.p = seed, p
+
+    def evaluate(self, symbol, bars, market):
+        last = bars[-1]
+        h = int(hashlib.sha256(f"{self.seed}|{symbol}|{last.ts}".encode()).hexdigest(), 16)
+        if (h % 1000) / 1000 > self.p:
+            return None
+        frac = D(1 + h % 9) / D(100)
+        return Signal(symbol, last.ts, last.close, last.close * (1 - D(h % 3) / 100), D(1),
+                      last.close * (1 - frac) / 3 * 3, D(h % 100) / 100)
+
+
+@pytest.mark.parametrize("policy", ["E1", "E2", "E3", "E4"])
+@pytest.mark.parametrize("costs", ["default", "zero", "high"])
+def test_fuzz_no_crash_and_exact_identity(policy, costs):
+    cm = {"default": CostModel(), "zero": ZERO,
+          "high": CostModel(taker_rate=D("0.01"), maker_rate=D("0.01"), half_spread_bps=D("40"), impact_k=D("3"),
+                            impact_cap_bps=D("300"))}[costs]
+    for seed in range(25):
+        rng = random.Random(f"{policy}-{costs}-{seed}")
+        data = {A: _fuzz_bars(rng, rng.randint(20, 260), rng.choice([100.0, 0.05, 30000.0])),
+                B: _fuzz_bars(rng, rng.randint(20, 260), 100.0)}
+        rk = risk(risk_per_trade_pct=D(rng.choice(["0.5", "1", "3"])), max_position_pct=D(rng.choice(["25", "100"])),
+                  max_exposure_pct=D(rng.choice(["50", "100"])), max_open_positions=rng.choice([1, 2]),
+                  daily_loss_soft_pct=D("2"), daily_loss_hard_pct=D("3"), drawdown_soft_pct=D("4"),
+                  drawdown_hard_pct=D("6"), min_notional=D("5"))
+        eq = D(rng.choice(["1000", "10000"]))
+        res = run(data, _HashSignals(seed, rng.choice([0.05, 0.3])), make_policy(policy), cost=cm, rk=rk,
+                  equity=str(eq), params=BacktestParams(time_stop_bars=rng.choice([None, 5])))
+        _identity_and_ticks(res, eq)
+
+
+def test_entry_bar_high_is_unknown_at_the_open():
+    """Verifier repro: highest_high_since_entry was seeded with the entry bar's HIGH and handed to
+    targets() in the same bar, so a target at that level sold at a price only known at the close."""
+    seen = []
+
+    def peek(st):
+        seen.append((st.bars_held, st.highest_high_since_entry))
+        return ((st.highest_high_since_entry, D(1), "peek_high"),)
+
+    bars = [flat(0), flat(1), bar(2, 100, 150, 99, 101), flat(3, 101), flat(4, 101)]
+    res = run(bars, Scripted({(A, 1): (90, "0.9")}), Policy(targets=peek))
+    assert seen[0] == (0, D(100))                      # only the entry bar's OPEN is known
+    assert all(x.price < D(150) for t in res.trades for x in t.exits)
+
+    record = []
+    run(bars, Scripted({(A, 1): (90, "0.9")}),
+        Policy(targets=lambda st: record.append((st.bars_held, st.highest_high_since_entry)) or ()))
+    assert record == [(0, D(100)), (1, D(150)), (2, D(150))]   # the high is folded in after the close
+
+
+def _reachable_candles(obj, depth=3):
+    """Every Candle reachable from `obj` through object references (gc referents), `depth` hops."""
+    found, stack, seen = [], [(obj, 0)], set()
+    while stack:
+        o, d = stack.pop()
+        if id(o) in seen or isinstance(o, (type, str, bytes, int, Decimal)):
+            continue
+        seen.add(id(o))
+        if isinstance(o, Candle):
+            found.append(o)
+            continue
+        if d < depth:
+            stack.extend((r, d + 1) for r in gc.get_referents(o))
+    return found
+
+
+def test_views_hold_no_future_bars_and_at_most_lookback():
+    """Verifier repro: BarsView kept a reference to the whole series (`bars._bars[bars._end]`)."""
+    checked = []
+
+    class Spy(Scripted):
+        def evaluate(self, symbol, bars, market):
+            for attr in ("_bars", "_items", "_end"):
+                with pytest.raises(AttributeError):
+                    getattr(bars, attr)
+            assert max(c.ts for c in _reachable_candles(bars)) == bars[-1].ts and len(bars) <= 5
+            with pytest.raises(IndexError):
+                bars[len(bars)]
+            checked.append(len(bars))
+            return super().evaluate(symbol, bars, market)
+
+    def on_bar(st, bars):
+        assert max(c.ts for c in _reachable_candles(bars)) == bars[-1].ts and len(bars) <= 5
+        checked.append(-len(bars))
+        return HOLD
+
+    data = [flat(i) for i in range(12)]
+    run(data, Spy({(A, 7): (92, 1)}), Policy(decide=on_bar), params=BacktestParams(lookback_bars=5))
+    assert max(checked) == 5 and min(checked) == -5
+
+
+def test_lookback_default_covers_the_s1_warmup_and_is_enforced():
+    p = BacktestParams()
+    assert p.lookback_bars == 400 >= MomentumSignalEngine().params.history_bars
+    with pytest.raises(ValueError, match="lookback"):
+        run([flat(i) for i in range(3)], MomentumSignalEngine(), params=BacktestParams(lookback_bars=299))
+    with pytest.raises(ValueError, match="lookback"):
+        run([flat(i) for i in range(3)], Scripted({}), params=BacktestParams(lookback_bars=0))
+
+
+def test_policy_stops_and_targets_are_quantized_to_the_tick():
+    third = D(1) / 3
+    tp = Policy(targets=lambda s: ((D(110) + third, D(1), "tp"),),
+                decide=lambda s, b: ExitDecision("update_stop", new_stop=D(95) + third))
+    res = run(BASE + [bar(3, 102, 103, 101, 102), bar(4, 102, 103, 95, 100)],
+              Scripted({(A, 1): (D(92) + third, 1)}), tp)
+    t = res.trades[0]
+    assert t.initial_stop == D("92.3333")                                      # signal stop: DOWN
+    assert (t.exits[0].reason, t.exits[0].ref_price) == ("stop", D("95.3334"))  # policy stop: UP
+    res = run(BASE + [bar(3, 102, 111, 101, 102)], Scripted({(A, 1): (92, 1)}), tp)
+    assert res.trades[0].exits[0].ref_price == D("110.3334")                   # target: UP
+    # a stop that rounding alone would lift to the close is rounded down instead
+    st = Policy(decide=lambda s, b: ExitDecision("update_stop", new_stop=D("101.99999")))
+    res = run(BASE + [flat(3, 102), flat(4, 102)], Scripted({(A, 1): (92, 1)}), st)
+    assert [x.kind for x in res.trades[0].exits] == ["end_of_data"]
+
+
+def test_e4_breakeven_buffer_covers_exit_spread_and_impact():
+    """Verifier d1.py: the fee-only breakeven stop left the remaining leg at -0.70 after spread and
+    impact on the stop fill. With the buffer the remainder nets >= 0."""
+    o = D(101)
+    bars = [flat(0, 100), flat(1, 100), bar(2, o, o + 15, o, o + 12), bar(3, o + 12, o + 13, o - 5, o + 1),
+            flat(4, o + 1)]
+    res = run(bars, Scripted({(A, 1): (90, "0.9", 50)}), Hybrid(), cost=CostModel())
+    (t,) = res.trades
+    leg = t.exits[-1]
+    assert leg.kind == "stop" and t.exits[0].reason == "partial_take_profit"
+    net = leg.notional - leg.fee - leg.qty * t.entry_price * (1 + CostModel().taker_rate)
+    assert net >= 0
