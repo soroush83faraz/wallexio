@@ -22,8 +22,10 @@ path. What it does guarantee is that none of the following appear anywhere in sr
    inspect or builtins.
 4. Outside oms.py, pipeline.py and exchange/: importing the broker modules
    (wallexbot.exchange.mock_wallex / .base, the wallexbot.exchange package itself) or referencing
-   MockWallex / mock_wallex, and calling any submit-like method (`*submit*`, `place_order`,
-   `send_order`, `create_order`, `new_order`, `post_order`).
+   MockWallex / mock_wallex or the live WallexBroker / wallex_private (read-only names from that
+   module, such as WallexAccountReader, stay importable: doctor.py uses them), and calling any
+   submit-like method (`*submit*`, `place_order`, `send_order`, `create_order`, `new_order`,
+   `post_order`).
 """
 from __future__ import annotations
 
@@ -56,7 +58,7 @@ ALLOWED_DYNAMIC: dict[tuple[str, tuple[str, ...], str], int] = {
 }
 
 BROKER_MODULES = frozenset({"wallexbot.exchange.mock_wallex", "wallexbot.exchange.base", "wallexbot.exchange"})
-BROKER_NAMES = frozenset({"MockWallex", "mock_wallex"})
+BROKER_NAMES = frozenset({"MockWallex", "mock_wallex", "WallexBroker", "wallex_private"})
 SUBMIT_LIKE = re.compile(r"submit|^(place|send|create|new|post)_?orders?$", re.IGNORECASE)
 
 
@@ -305,6 +307,12 @@ ROGUE = {
     "import exchange package": ("risk/rogue.py", "from wallexbot import exchange\n"),
     "relative import": ("strategy/rogue.py", "from ..exchange import mock_wallex\n"),
     "relative import of module": ("strategy/rogue.py", "from ..exchange.mock_wallex import MockClock\n"),
+    "import live WallexBroker": ("strategy/rogue.py",
+                                 "from wallexbot.exchange.wallex_private import WallexBroker\n"),
+    "live broker via module": ("guardian/rogue.py", "from wallexbot.exchange import wallex_private\n"
+                                                    "b = wallex_private.WallexBroker(None, None)\n"),
+    "live broker module attribute": ("ai/rogue.py", "import wallexbot.exchange.wallex_private as w\n"
+                                                    "b = w.WallexBroker(None, None)\n"),
     "submit-like call": ("strategy/rogue.py", "def run(x):\n    x.place_order(1)\n"),
     "submit call outside oms": ("risk/rogue.py", "def run(oms, i):\n    oms.submit(i)\n"),
     "keyword named submit_order": ("strategy/rogue.py", "def run(f, b):\n    f(submit_order=b)\n"),
