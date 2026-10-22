@@ -28,9 +28,9 @@ IOC, 20 s) and stale LIMIT exits (10 s) -> sync positions with the ledger -> new
 policy per position, entry evaluation / ranking / sizing / advisor / submit) -> software stops and
 targets on live quotes -> place pending exits -> sync again.
 
-Run the guardian as a SEPARATE process on the same database:
-    python -m wallexbot.guardian.main --db PATH --mode mock|shadow
-It watches the "strategy" heartbeat written here every tick, loss limits and ledger-vs-exchange.
+The guardian runs in the same process (bot/main.py, guardian/main.py InProcessGuardian), ticked
+after every bot tick on its own Store connection and the same broker object. It watches the
+"strategy" heartbeat written here every tick, loss limits and ledger-vs-broker balances.
 """
 from __future__ import annotations
 
@@ -52,6 +52,7 @@ from wallexbot.pipeline import cancel_open_intent, route_to_oms, snapshot_accoun
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.strategy.config import MomentumParams
 from wallexbot.strategy.cooldown import CooldownTracker
+from wallexbot.strategy.profiles import assert_profile_allowed
 from wallexbot.types import TERMINAL_STATES, IntentState, OrderIntent, OrderType, Position, Quote, Side, round_down
 
 S = IntentState
@@ -120,11 +121,16 @@ def simple_atr(bars: Sequence[Candle], period: int) -> Decimal | None:
 class Bot:
     def __init__(self, feed, signal_engine, exit_policy, sizing: Callable[..., Any], oms, risk, store, killswitch,
                  config: Config, clock: Callable[[], float] = time.time, advisor: Any = None, *,
-                 params: BotParams | None = None) -> None:
+                 params: BotParams | None = None, profile: str = "strict",
+                 run_info: Mapping[str, Any] | None = None) -> None:
+        self.run_info = {**dict(run_info or {}), "profile": profile}
+        if profile != "strict":   # the exercise profile needs an explicit mock/shadow run, never live
+            assert_profile_allowed(profile, str(self.run_info.get("mode")), config.mode)
+        self.profile = profile
         self.feed, self.engine, self.exit_policy, self.sizing = feed, signal_engine, exit_policy, sizing
         self.oms, self.risk, self.store, self.ks, self.cfg, self.clock = oms, risk, store, killswitch, config, clock
         self.p = params or BotParams()
-        self.state = BotState(store)
+        self.state = BotState(store, profile=profile)
         self.advisor = AdvisorGate(advisor, self.p.advisor_timeout_s) if advisor is not None else None
         self.cooldown = CooldownTracker(self.p.bar_s, self.p.cooldown_bars, self.p.cooldown_bars_profitable)
         self.positions: dict[str, TrackedPosition] = {}
@@ -199,7 +205,8 @@ class Bot:
         self.started = True
         self._decision("startup", {"positions": {s: {"key": t.key, "current_stop": t.current_stop}
                                                  for s, t in sorted(self.positions.items())},
-                                   "open_plans": sorted(self.plans), "recovered": recovered}, now)
+                                   "open_plans": sorted(self.plans), "recovered": recovered,
+                                   "run": self.run_info}, now)
         rep.actions.append("startup")
 
     def _recover_own_intents(self, now: float) -> list[str]:

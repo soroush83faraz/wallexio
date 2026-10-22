@@ -6,6 +6,10 @@ Opens the SQLite audit DB with ``file:...?mode=ro`` and prints ONE line of JSON.
 Checks (table and column names come from wallexbot/store.py):
   * strategy heartbeat: newest audit_events row (actor='strategy', kind='heartbeat') must be
     younger than --max-heartbeat-age-s (default 120). No heartbeat at all is unhealthy.
+  * run: the bot's latest 'startup' event (actor='bot') gives the run's mode, strategy profile
+    (strict | demo, reported as "profile"; "exercise_profile" is true for demo) and whether the
+    in-process guardian is enabled. If it is, the guardian heartbeat (actor='guardian',
+    kind='heartbeat') must be younger than --max-heartbeat-age-s too.
   * kill switch: latest killswitch_events row. Engaged is REPORTED and exits 0 with a warning,
     unless --fail-on-killswitch is given (then exit 1).
   * alerts in the last --alert-window-min minutes (default 15), any of: errors rows whose source
@@ -55,6 +59,24 @@ def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_mi
             if age > max_heartbeat_age_s:
                 problems.append(f"strategy heartbeat is {age:.0f}s old (limit {max_heartbeat_age_s:.0f}s)")
 
+        run = _latest_run(conn)
+        out["profile"] = run.get("profile")
+        out["exercise_profile"] = run.get("profile") == "demo"
+        out["mode"] = run.get("mode")
+        g = run.get("guardian") if isinstance(run.get("guardian"), dict) else {}
+        out["guardian_enabled"] = g.get("enabled")
+        if out["exercise_profile"]:
+            warnings.append("EXERCISE PROFILE (demo) - no edge claimed - shadow/paper only")
+        if g.get("enabled"):
+            grow = conn.execute("SELECT ts FROM audit_events WHERE actor='guardian' AND kind=? ORDER BY id DESC "
+                                "LIMIT 1", (HEARTBEAT_KIND,)).fetchone()
+            gage = None if grow is None else now - float(grow[0])
+            out["guardian_heartbeat_age_s"] = None if gage is None else round(gage, 1)
+            if gage is None:
+                problems.append("guardian enabled but no guardian heartbeat yet")
+            elif gage > max_heartbeat_age_s:
+                problems.append(f"guardian heartbeat is {gage:.0f}s old (limit {max_heartbeat_age_s:.0f}s)")
+
         ks = conn.execute("SELECT engaged, reason, actor FROM killswitch_events ORDER BY id DESC LIMIT 1").fetchone()
         engaged = ks is not None and ks[0] != 0          # same rule as KillSwitch: anything but 0 is engaged
         out["killswitch_engaged"] = engaged
@@ -81,6 +103,21 @@ def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_mi
     finally:
         conn.close()
     out["problems"], out["warnings"] = problems, warnings
+    return out
+
+
+def _latest_run(conn: sqlite3.Connection) -> dict:
+    """The run record of the bot's latest startup event ({} if none or unreadable)."""
+    row = conn.execute("SELECT payload FROM audit_events WHERE actor='bot' AND kind='startup' "
+                       "ORDER BY id DESC LIMIT 1").fetchone()
+    try:
+        p = json.loads(row[0]) if row is not None else {}
+    except (TypeError, ValueError):
+        return {}
+    run = p.get("run") if isinstance(p, dict) else None
+    out = dict(run) if isinstance(run, dict) else {}
+    if "profile" not in out and isinstance(p, dict) and p.get("profile"):
+        out["profile"] = p["profile"]
     return out
 
 

@@ -2,6 +2,7 @@
 
     python -m wallexbot.bot.main --db PATH --mode mock|shadow [--replay-from DIR] [--max-ticks N]
                                  [--interval-s S] [--config PATH] [--balance USDT]
+                                 [--profile strict|demo] [--no-guardian] [--guardian-interval-s S]
 
 - `--mode mock --replay-from DIR`: fully offline paper run. DIR uses the data.history layout
   (<DIR>/<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv + .sha256). ReplayFeed drives a paper MockWallex
@@ -13,11 +14,18 @@
   fills against the live public book). --interval-s is wall-clock seconds between ticks (12).
 - SIGINT / SIGTERM stop the loop after the current tick.
 
-The guardian is a SEPARATE process on the same database (it watches this loop's "strategy"
-heartbeat, loss limits and ledger-vs-exchange, and flattens on a hard breach):
-    python -m wallexbot.guardian.main --db PATH --mode mock|shadow
-(In mock/replay runs the paper broker lives inside this process, so a separately started guardian
-sees its own demo broker, not this one; the ledger, heartbeat and kill switch are shared via the DB.)
+Guardian (default on; --no-guardian disables it): an InProcessGuardian (guardian/main.py) with its
+own Store connection on the same database and the SAME broker object as the bot, ticked after every
+bot tick and, while the bot sleeps longer than --guardian-interval-s (15), in between. It watches
+the "strategy" heartbeat, loss limits and ledger-vs-broker balances, engages the kill switch and
+flattens on a hard breach, through the OMS, against the paper/shadow broker. In shadow mode this
+EXERCISES the guardian logic on simulated fills. A separate guardian process would only make sense
+against a live exchange account, which this build does not have.
+
+Profiles (--profile): `strict` (default) is S1 as specified; `demo` is an EXERCISE profile with
+relaxed thresholds (strategy/profiles.py) so that mock/shadow runs show a full lifecycle. It prints
+EXERCISE_BANNER, is written into every bot audit event and the healthcheck output, and is refused
+for anything but mock/shadow.
 """
 from __future__ import annotations
 
@@ -38,6 +46,8 @@ from wallexbot.bot.loop import Bot, BotParams
 from wallexbot.config import DEFAULT_PATH, Config, ConfigError, load_config
 from wallexbot.data.candles import Candle
 from wallexbot.data.history import load_history
+from wallexbot.guardian.main import DEFAULT_INTERVAL_S as GUARDIAN_INTERVAL_S
+from wallexbot.guardian.main import InProcessGuardian
 from wallexbot.oms import OMS
 from wallexbot.pipeline import auto_approve, build_paper_broker
 from wallexbot.risk.engine import RiskEngine
@@ -46,6 +56,7 @@ from wallexbot.store import Store
 from wallexbot.strategy.config import MomentumParams
 from wallexbot.strategy.exits import ExitParams, make_policy
 from wallexbot.strategy.momentum import MomentumSignalEngine
+from wallexbot.strategy.profiles import EXERCISE_BANNER, PROFILES, ProfileError, momentum_params
 from wallexbot.strategy.sizing import size_position
 from wallexbot.types import IntentState, SymbolRules
 
@@ -53,7 +64,9 @@ ALLOWED_MODES = ("mock", "shadow")
 DEFAULT_BALANCE = Decimal("1000")        # USDT; override with --balance
 BOOK_MAX_AGE_S = 60.0                    # a cached public depth older than this is not a book to simulate fills on
 JOURNAL_NAME = "shadow_journal.jsonl"    # next to the database
-GUARDIAN_HINT = "run the guardian as a separate process: python -m wallexbot.guardian.main --db {db} --mode {mode}"
+GUARDIAN_ON = ("guardian: in-process (same broker object, own DB connection), tick after every bot tick, "
+               "at least every {interval:g}s while the bot sleeps")
+GUARDIAN_OFF = "guardian: DISABLED (--no-guardian): no loss-limit, heartbeat or balance watchdog in this run"
 _MONTH_FILE = re.compile(r"^(?P<sym>[A-Z0-9]{3,20})_1m_(?P<y>\d{4})-(?P<m>\d{2})\.csv$")
 log = logging.getLogger("wallexbot.bot")
 
@@ -156,11 +169,47 @@ def build_stack(store: Store, broker, rules: Mapping[str, SymbolRules], config: 
 
 
 def build_bot(feed, oms, risk, store, ks, config: Config, clock, *, advisor: Any = None,
-              params: BotParams | None = None, exit_policy: str = "E4") -> Bot:
-    """S1 momentum entries, E4 hybrid exits (fee rate from config), risk-based sizing."""
+              params: BotParams | None = None, exit_policy: str = "E4", profile: str = "strict",
+              run_info: Mapping[str, Any] | None = None) -> Bot:
+    """S1 momentum entries (profile strict, or the demo EXERCISE profile), E4 hybrid exits (fee rate
+    from config), risk-based sizing."""
+    info = {"mode": "mock", **dict(run_info or {})}
+    engine = MomentumSignalEngine(momentum_params(profile, str(info["mode"]), config.mode))
     policy = make_policy(exit_policy, ExitParams(fee_rate=config.taker_rate))
-    return Bot(feed, MomentumSignalEngine(), policy, size_position, oms, risk, store, ks, config, clock, advisor,
-               params=params)
+    return Bot(feed, engine, policy, size_position, oms, risk, store, ks, config, clock, advisor,
+               params=params, profile=profile, run_info=info)
+
+
+def make_guardian(enabled: bool, db: str | Path, broker, rules: Mapping[str, SymbolRules], config: Config,
+                  clock, sleep, interval_s: float, universe) -> InProcessGuardian | None:
+    if not enabled:
+        return None
+    try:
+        return InProcessGuardian(db, broker, rules, config, clock=clock, sleep=sleep, interval_s=interval_s,
+                                 universe=universe)
+    except ValueError as e:
+        raise BotSetupError(f"guardian: {e} (or pass --no-guardian)") from e
+
+
+def _run_info(mode: str, profile: str, guardian: bool, guardian_interval_s: float, **extra: Any) -> dict[str, Any]:
+    return {"mode": mode, "profile": profile,
+            "guardian": {"enabled": bool(guardian), "in_process": True, "interval_s": guardian_interval_s},
+            **extra}
+
+
+def _guarded_sleep(sleep: Callable[[float], Any], total: float, guardian: InProcessGuardian | None,
+                   stop: StopFlag) -> None:
+    """Sleep `total` seconds; with a guardian, in chunks of its interval, ticking it in between."""
+    if guardian is None:
+        sleep(total)
+        return
+    remaining = total
+    while remaining > 0 and not stop.is_set():
+        chunk = min(remaining, guardian.interval_s)
+        sleep(chunk)
+        remaining -= chunk
+        if remaining > 0 and not stop.is_set() and guardian.due():
+            guardian.tick()
 
 
 def load_replay_dir(path: str | Path, symbols: Sequence[str] | None = None) -> dict[str, list[Candle]]:
@@ -194,7 +243,7 @@ def infer_rules(candles: Mapping[str, Sequence[Candle]], quote_ccy: str, amount_
     return rules
 
 
-def summarize(store: Store, bot: Bot, ticks: int) -> dict[str, Any]:
+def summarize(store: Store, bot: Bot, ticks: int, guardian: InProcessGuardian | None = None) -> dict[str, Any]:
     intents = store.intents_in_states(frozenset(IntentState))
     by_state: dict[str, int] = {}
     for r in intents:
@@ -205,15 +254,19 @@ def summarize(store: Store, bot: Bot, ticks: int) -> dict[str, Any]:
             "realized_pnl": {s: str(p.realized_pnl) for s, p in sorted(positions.items())},
             "open_positions": {s: str(p.quantity) for s, p in sorted(positions.items()) if p.quantity > 0},
             "tracked": sorted(bot.positions), "kill_switch_engaged": bot.ks.is_engaged(),
-            "consecutive_failures": bot.consecutive_failures}
+            "consecutive_failures": bot.consecutive_failures, "profile": bot.profile,
+            "guardian": None if guardian is None else {"ticks": guardian.ticks, "failed": guardian.failed_ticks}}
 
 
 # ---------------------------------------------------------------------------- runners
 def run_replay(db: str | Path, replay_dir: str | Path, config: Config, *, step_s: float = 60.0,
                max_ticks: int | None = None, balances: Mapping[str, Decimal] | None = None,
                advisor: Any = None, params: BotParams | None = None, stop: StopFlag | None = None,
-               symbols: Sequence[str] | None = None, on_tick: Callable[[Any], Any] | None = None) -> dict[str, Any]:
-    """Offline end-to-end paper run over recorded 1m candles under an accelerated clock."""
+               symbols: Sequence[str] | None = None, on_tick: Callable[[Any], Any] | None = None,
+               profile: str = "strict", guardian: bool = True,
+               guardian_interval_s: float = GUARDIAN_INTERVAL_S) -> dict[str, Any]:
+    """Offline end-to-end paper run over recorded 1m candles under an accelerated clock. The guardian
+    ticks after every bot tick (simulated time; flatten waits advance the simulated clock)."""
     candles = load_replay_dir(replay_dir, symbols)
     if not candles:
         raise BotSetupError(f"no 1m candle files found under {replay_dir}")
@@ -226,18 +279,26 @@ def run_replay(db: str | Path, replay_dir: str | Path, config: Config, *, step_s
     broker = make_broker("mock", config=config, clock=clock, rules=rules, balances=balances)
     feed = ReplayFeed(candles, rules, config, on_book=broker.set_book)
     store = Store(db, clock=clock)
+    gd = None
     try:
         ks, risk, oms = build_stack(store, broker, rules, config, clock)
-        bot = build_bot(feed, oms, risk, store, ks, config, clock, advisor=advisor, params=params)
+        bot = build_bot(feed, oms, risk, store, ks, config, clock, advisor=advisor, params=params, profile=profile,
+                        run_info=_run_info("mock", profile, guardian, guardian_interval_s, replay=True))
+        gd = make_guardian(guardian, db, broker, rules, config, clock, clock.advance, guardian_interval_s,
+                           lambda: set(feed.symbols()) | set(bot.positions))
         ticks = 0
         while clock() <= last + MIN_S and not stop.is_set() and (max_ticks is None or ticks < max_ticks):
             rep = bot.tick()
+            if gd is not None:
+                gd.tick()
             ticks += 1
             if on_tick is not None:
                 on_tick(rep)
             clock.advance(step_s)
-        return summarize(store, bot, ticks)
+        return summarize(store, bot, ticks, gd)
     finally:
+        if gd is not None:
+            gd.close()
         store.close()
 
 
@@ -246,8 +307,10 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
                   advisor: Any = None, stop: StopFlag | None = None, clock: Callable[[], float] = time.time,
                   sleep: Callable[[float], Any] | None = None,
                   on_tick: Callable[[Any], Any] | None = None,
-                  journal_path: str | Path | None = None) -> dict[str, Any]:
-    """mock (paper broker mirrored from the public book) or shadow (ShadowBroker) on PublicFeed."""
+                  journal_path: str | Path | None = None, profile: str = "strict", guardian: bool = True,
+                  guardian_interval_s: float = GUARDIAN_INTERVAL_S) -> dict[str, Any]:
+    """mock (paper broker mirrored from the public book) or shadow (ShadowBroker) on PublicFeed. The
+    guardian ticks after every bot tick and, during longer sleeps, every guardian_interval_s."""
     stop = stop or StopFlag()
     sleep = sleep or stop.wait
     if client is None:
@@ -260,21 +323,29 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
     if mode == "mock":
         feed.on_book = broker.set_book   # paper fills at the live public prices
     store = Store(db, clock=clock)
+    gd = None
     try:
         ks, risk, oms = build_stack(store, broker, rules, config, clock)
-        bot = build_bot(feed, oms, risk, store, ks, config, clock, advisor=advisor)
+        bot = build_bot(feed, oms, risk, store, ks, config, clock, advisor=advisor, profile=profile,
+                        run_info=_run_info(mode, profile, guardian, guardian_interval_s))
+        gd = make_guardian(guardian, db, broker, rules, config, clock, sleep, guardian_interval_s,
+                           lambda: set(feed.symbols()) | set(bot.positions))
         ticks = 0
         while not stop.is_set() and (max_ticks is None or ticks < max_ticks):
             pre_tick(feed, broker, clock)
             rep = bot.tick()
+            if gd is not None:
+                gd.tick()
             ticks += 1
             if on_tick is not None:
                 on_tick(rep)
             if stop.is_set() or (max_ticks is not None and ticks >= max_ticks):
                 break
-            sleep(interval_s)
-        return summarize(store, bot, ticks)
+            _guarded_sleep(sleep, interval_s, gd, stop)
+        return summarize(store, bot, ticks, gd)
     finally:
+        if gd is not None:
+            gd.close()
         store.close()
 
 
@@ -292,6 +363,13 @@ def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
                    help="replay: simulated seconds per tick (60); otherwise wall seconds between ticks (12)")
     p.add_argument("--config", default=None, help="config YAML (default: config/default.yaml)")
     p.add_argument("--balance", default=str(DEFAULT_BALANCE), help="starting balance in the quote currency (USDT)")
+    p.add_argument("--profile", default="strict", choices=PROFILES,
+                   help="strict (default: S1 as specified) | demo (EXERCISE profile, relaxed thresholds, "
+                        "mock/shadow only, no edge claimed)")
+    p.add_argument("--no-guardian", action="store_true",
+                   help="do not run the in-process guardian (exercises the bot alone; no watchdog)")
+    p.add_argument("--guardian-interval-s", type=float, default=GUARDIAN_INTERVAL_S,
+                   help="guardian ticks after every bot tick and at least this often while the bot sleeps (15)")
     args = p.parse_args(argv)
     if args.mode == "live":
         print("refused: live trading is not wired into the bot; use --mode mock or --mode shadow",
@@ -309,8 +387,24 @@ def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
     except (ConfigError, OSError, ArithmeticError, ValueError, KeyError) as e:
         print(f"refused: bad configuration: {e}", file=sys.stderr)
         return 2
+    try:
+        momentum_params(args.profile, args.mode, cfg.mode)
+    except ProfileError as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
+    if not 0 < args.guardian_interval_s <= 3600:
+        print("refused: --guardian-interval-s must be in (0, 3600]", file=sys.stderr)
+        return 2
+    guardian = not args.no_guardian
+    if guardian and str(args.db) == ":memory:":
+        print("refused: the in-process guardian needs a database file; use a path or --no-guardian",
+              file=sys.stderr)
+        return 2
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    print(GUARDIAN_HINT.format(db=args.db, mode=args.mode), flush=True)
+    if args.profile == "demo":
+        print(f"*** {EXERCISE_BANNER} ***", flush=True)
+    print(f"profile: {args.profile}", flush=True)
+    print(GUARDIAN_ON.format(interval=args.guardian_interval_s) if guardian else GUARDIAN_OFF, flush=True)
     stop = StopFlag()
     previous = {}
     if threading.current_thread() is threading.main_thread():
@@ -328,12 +422,15 @@ def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
         if args.replay_from:
             summary = run_replay(args.db, args.replay_from, cfg, step_s=args.interval_s or 60.0,
                                  max_ticks=args.max_ticks, balances=balances, stop=stop, on_tick=show,
-                                 advisor=advisor)
+                                 advisor=advisor, profile=args.profile, guardian=guardian,
+                                 guardian_interval_s=args.guardian_interval_s)
         else:
             journal = None if str(args.db) == ":memory:" else Path(args.db).parent / JOURNAL_NAME
             summary = run_feed_loop(args.mode, args.db, cfg, interval_s=args.interval_s or 12.0,
                                     max_ticks=args.max_ticks, balances=balances, stop=stop, on_tick=show,
-                                    advisor=advisor, journal_path=journal if args.mode == "shadow" else None)
+                                    advisor=advisor, journal_path=journal if args.mode == "shadow" else None,
+                                    profile=args.profile, guardian=guardian,
+                                    guardian_interval_s=args.guardian_interval_s)
     except BotSetupError as e:
         print(f"refused: {e}", file=sys.stderr)
         return 2

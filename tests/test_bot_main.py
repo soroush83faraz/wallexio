@@ -67,7 +67,7 @@ def test_offline_replay_cli_end_to_end(tmp_path, capsys):
     rc = bot_main.main(["--db", str(db), "--mode", "mock", "--replay-from", str(data),
                         "--config", str(_cheap_yaml(tmp_path)), "--interval-s", "60"])
     out = capsys.readouterr().out
-    assert rc == 0 and "guardian.main" in out and "bot stopped" in out
+    assert rc == 0 and "guardian: in-process" in out and "bot stopped" in out
     s = Store(db)
     intents = s.intents_in_states(set(IntentState))
     assert len(intents) == 3 and all(r.state.value == "filled" for r in intents)

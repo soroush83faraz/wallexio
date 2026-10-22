@@ -1,8 +1,11 @@
 # wallexbot, SHADOW mode only (simulated fills on the public order book; no orders are ever sent).
 #
-#   docker compose up -d --build                     # the shadow bot
+#   docker compose up -d --build                     # the shadow bot (its guardian runs in-process)
 #   docker compose --profile recorder up -d          # also the market-data recorder
-#   docker compose --profile guardian up -d          # opt-in guardian: read the warning on that service first
+#
+# There is no separate guardian service: the bot runs the guardian in-process against its own shadow
+# broker (`--no-guardian` disables it). A separate guardian process only makes sense against a live
+# exchange account, which this build does not have (docs/DEPLOY.md, "Guardian").
 #
 # Network: the only host the containers need is api.wallex.ir (HTTPS, public GET). Compose cannot
 # filter egress by host; restrict it at the host firewall if you need that. No ports are published.
@@ -35,27 +38,12 @@ x-common: &common
 services:
   bot:
     <<: *common
-    build: .                     # the one image for all three services
+    build: .                     # the one image for both services
     container_name: wallexbot-bot
     command: ["python", "-m", "wallexbot", "bot", "--db", "/data/bot.db", "--mode", "shadow",
               "--balance", "1000", "--interval-s", "12"]
     mem_limit: 768m
     cpus: 1.0
-
-  # OPT-IN (--profile guardian). In this build the guardian CLI is a demo loop: it watches its OWN in-memory
-  # mock broker (10000 USDT), not the bot's shadow broker, and writes equity high-water marks into the shared
-  # DB. Against a bot started with --balance 1000 that looks like a 90% drawdown and blocks the bot's entries.
-  # Do not enable it on a shadow bot DB until the guardian can read the shadow broker (docs/DEPLOY.md).
-  # Exactly ONE guardian per database.
-  guardian:
-    <<: *common
-    container_name: wallexbot-guardian
-    profiles: ["guardian"]
-    command: ["python", "-m", "wallexbot", "guardian", "--db", "/data/bot.db", "--mode", "shadow"]
-    depends_on:
-      - bot
-    mem_limit: 256m
-    cpus: 0.5
 
   # Optional public-data recorder: depth + trades to /data/recorder/*.jsonl. Start with --profile recorder.
   recorder:

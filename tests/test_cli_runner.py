@@ -93,7 +93,7 @@ def test_arm_live_is_not_an_argparse_option():
 def test_guardian_delegates_and_refuses_live_mode(tmp_path, capsys):
     assert cli.main(["guardian", "--db", str(tmp_path / "g.db"), "--mode", "live"]) == 2
     assert "refused" in capsys.readouterr().err
-    assert cli.main(["guardian", "--db", str(tmp_path / "g.db"), "--mode", "mock", "--ticks", "1",
+    assert cli.main(["guardian", "--db", str(tmp_path / "g.db"), "--mode", "mock", "--demo-db", "--ticks", "1",
                      "--interval", "0"]) == 0
     assert "guardian stopped: ticks=1" in capsys.readouterr().out
 
