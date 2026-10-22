@@ -1,0 +1,76 @@
+# wallexbot, SHADOW mode only (simulated fills on the public order book; no orders are ever sent).
+#
+#   docker compose up -d --build                     # the shadow bot
+#   docker compose --profile recorder up -d          # also the market-data recorder
+#   docker compose --profile guardian up -d          # opt-in guardian: read the warning on that service first
+#
+# Network: the only host the containers need is api.wallex.ir (HTTPS, public GET). Compose cannot
+# filter egress by host; restrict it at the host firewall if you need that. No ports are published.
+# Secrets: shadow mode needs none. `.env` is optional and read by name only (see .env.example);
+# never put WALLEX_API_KEY_TRADE or WALLEX_ARM_LIVE in it.
+
+x-common: &common
+  image: wallexbot:shadow
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=16m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  env_file:
+    - path: .env
+      required: false
+  volumes:
+    - wallex-data:/data
+  pids_limit: 128
+  stop_grace_period: 60s        # the bot finishes its current tick on SIGTERM
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  bot:
+    <<: *common
+    build: .                     # the one image for all three services
+    container_name: wallexbot-bot
+    command: ["python", "-m", "wallexbot", "bot", "--db", "/data/bot.db", "--mode", "shadow",
+              "--balance", "1000", "--interval-s", "12"]
+    mem_limit: 768m
+    cpus: 1.0
+
+  # OPT-IN (--profile guardian). In this build the guardian CLI is a demo loop: it watches its OWN in-memory
+  # mock broker (10000 USDT), not the bot's shadow broker, and writes equity high-water marks into the shared
+  # DB. Against a bot started with --balance 1000 that looks like a 90% drawdown and blocks the bot's entries.
+  # Do not enable it on a shadow bot DB until the guardian can read the shadow broker (docs/DEPLOY.md).
+  # Exactly ONE guardian per database.
+  guardian:
+    <<: *common
+    container_name: wallexbot-guardian
+    profiles: ["guardian"]
+    command: ["python", "-m", "wallexbot", "guardian", "--db", "/data/bot.db", "--mode", "shadow"]
+    depends_on:
+      - bot
+    mem_limit: 256m
+    cpus: 0.5
+
+  # Optional public-data recorder: depth + trades to /data/recorder/*.jsonl. Start with --profile recorder.
+  recorder:
+    <<: *common
+    container_name: wallexbot-recorder
+    profiles: ["recorder"]
+    command: ["python", "/app/deploy/run_recorder.py", "--out-dir", "/data/recorder", "--interval-s", "15"]
+    healthcheck:
+      test: ["CMD", "python", "/app/deploy/healthcheck.py", "--recorder-dir", "/data/recorder"]
+      interval: 60s
+      timeout: 10s
+      start_period: 120s
+      retries: 3
+    mem_limit: 256m
+    cpus: 0.5
+
+volumes:
+  wallex-data:
