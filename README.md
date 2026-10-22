@@ -12,7 +12,7 @@ This is a hackathon submission. It does not promise profit. "No trades" is a val
 - A single order path: every order goes through the OMS, which calls the broker. Nothing else submits orders.
 - Fail-closed risk engine: any failed check blocks the order. A kill switch blocks new entries but not reduce-only exits.
 - An optional AI advisor (`ai/`, `advisor_bridge.py`) that can only veto or size down. It is off by default; `bot --advisor shadow` records its verdicts without acting on them (`apply` is never enabled). Its calls to the Anthropic API are tested against a fake transport only.
-- A guardian that reads the broker state and flattens positions on a hard breach (`guardian/`; besides the bot's own repeated-failure check, the only component that engages the kill switch automatically, and it releases only its own transient heartbeat engagement, docs/RISK.md). In this build it runs **inside the bot process**, on its own database connection and the bot's own paper/shadow broker (`--no-guardian` disables it). A separate guardian process only makes sense against a live exchange account, which does not exist here.
+- A guardian that reads the broker state and flattens positions on a hard breach (`guardian/`; besides the bot's own repeated internal-failure check (an exchange outage is "degraded", never a failure), the only component that engages the kill switch automatically, and it releases only its own transient heartbeat engagement, docs/RISK.md). In this build it runs **inside the bot process**, on its own database connection and the bot's own paper/shadow broker (`--no-guardian` disables it). A separate guardian process only makes sense against a live exchange account, which does not exist here.
 - An append-only SQLite audit store (implemented in `store.py`).
 
 ## What exists now
@@ -42,7 +42,7 @@ Requires Python 3.12. No credentials are needed or used.
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest -q
 ```
 
-Verified on the code at this commit: `pytest -q` reports 1948 passed.
+Verified on the code at this commit: `pytest -q` reports 2000 passed.
 
 Run it (all offline except `bot --mode shadow`, which makes public GET requests only):
 

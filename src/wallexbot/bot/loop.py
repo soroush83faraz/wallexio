@@ -17,8 +17,22 @@ Invariants:
   exit request) and the cooldown tracker are appended to the store on every change (bot/state.py)
   and reloaded on startup, then reconciled with the OMS ledger and exchange balances.
 - Never raises. Each stage is isolated; a failing stage is recorded (errors table) and the tick
-  goes on. `max_consecutive_failures` failing ticks in a row engage the kill switch (entries off,
-  exits continue). A tick with any failed stage takes no new entries.
+  goes on. A tick with any failed stage takes no new entries. `max_consecutive_failures` ticks in
+  a row with an INTERNAL failure engage the kill switch with the reason
+  `bot: <n> consecutive internal failures` (entries off, exits continue; operator-cleared only,
+  never auto-released: it signals a bug).
+- Market data down is DEGRADED, not a failure. A feed stage raising one of
+  feed.TRANSIENT_FEED_ERRORS (FeedError: every request of the refresh failed; HTTP / 429 /
+  timeout / unparseable response), or a feed that still reports `outage_since`, marks the bot
+  feed-down: one `feed_down` decision event when it starts, a `bot.feed_down` errors row then and
+  at most every FEED_ALERT_EVERY_S (5 min) with the outage start and duration, `feed_restored`
+  when a refresh succeeds again. While feed-down: no new entries (`feed_down`, retried on the next
+  poll like stale data, so entries resume on the first good refresh), the heartbeat is still
+  written every tick, every other stage runs as usual (exits, stops), and the tick counts as
+  neither a failure nor a success for the kill-switch counter (an internal failure during an
+  outage still counts). Long outages with a held position are the guardian's (stale_action).
+  The outage duration only accumulates forward clock movement between ticks, so a backward clock
+  step neither makes it negative nor stalls the 5-minute alert timer.
 - Entries only on a NEW closed 15m bar, and only with fresh data (quote age <= max_data_age_s,
   bars lagging the clock by <= max_bar_lag_bars). Exits: strategy decisions on new bars, software
   stop / take-profit checks on every poll, stale data or not.
@@ -45,7 +59,7 @@ from decimal import ROUND_CEILING, Decimal
 from typing import Any, Callable, Mapping, Sequence
 
 from wallexbot.bot.advice import AdvisorGate
-from wallexbot.bot.feed import BAR_S, notional_within
+from wallexbot.bot.feed import BAR_S, TRANSIENT_FEED_ERRORS, notional_within
 from wallexbot.bot.state import (ACTOR, EXIT_PREFIX, BotState, EntryPlan, ExitRequest, TrackedPosition,
                                  exit_prefix, exit_signal_id)
 from wallexbot.clockstep import StepAnchors
@@ -64,7 +78,8 @@ S = IntentState
 GUARDIAN_PREFIX = "gflat:"          # guardian flatten intents (guardian/flatten.py), never recovered here
 HEARTBEAT_COMPONENT = "strategy"    # what the guardian watches
 _ALL_STATES = frozenset(IntentState)
-_RETRY_REASONS = frozenset({"tick_degraded", "stale_feed", "no_market_context"})
+_RETRY_REASONS = frozenset({"tick_degraded", "feed_down", "stale_feed", "no_market_context"})
+FEED_ALERT_EVERY_S = 300.0          # feed-down: an errors row at most this often while it lasts
 _ZERO = Decimal(0)
 _BPS = Decimal(10000)
 _HUNDRED = Decimal(100)
@@ -109,9 +124,12 @@ class TickReport:
     ts: float
     new_bar: bool = False
     actions: list[str] = field(default_factory=list)
-    errors: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)       # internal failures (count toward the kill switch)
+    degraded: list[str] = field(default_factory=list)     # market data down (never counts)
     consecutive_failures: int = 0
     engaged_kill_switch: bool = False
+    feed_down_since: float | None = None                  # wall ts the outage was first seen; None = feed up
+    feed_outage_s: float | None = None                    # outage duration so far (clock-step safe)
 
 
 def simple_atr(bars: Sequence[Candle], period: int) -> Decimal | None:
@@ -148,6 +166,10 @@ class Bot:
         self._stale_noted: dict[str, int] = {}
         self._retry_noted: set[tuple[str, int, str]] = set()
         self._exit_age = StepAnchors()      # resting LIMIT exit age (backward-clock-step safe)
+        self.feed_down_since: float | None = None
+        self.feed_outage_s: float | None = None
+        self._feed_last: float = 0.0              # clock at the previous feed-down tick
+        self._feed_alerted: float | None = None   # feed_outage_s at the last errors row
 
     # ================================================================== tick
     def tick(self) -> TickReport:
@@ -165,6 +187,7 @@ class Bot:
             self._count_failures(now, rep)
         except Exception as e:
             rep.errors.append(f"failures:{type(e).__name__}")
+        rep.feed_down_since, rep.feed_outage_s = self.feed_down_since, self.feed_outage_s
         self.ticks += 1
         return rep
 
@@ -189,10 +212,15 @@ class Bot:
             self._error(name, repr(e), now)
 
     def _count_failures(self, now: float, rep: TickReport) -> None:
-        self.consecutive_failures = self.consecutive_failures + 1 if rep.errors else 0
+        """Internal failures only. A feed-down tick without one leaves the count unchanged: it
+        neither proves the data-driven stages healthy nor is it a bug."""
+        if rep.errors:
+            self.consecutive_failures += 1
+        elif self.feed_down_since is None:
+            self.consecutive_failures = 0
         rep.consecutive_failures = self.consecutive_failures
         if self.consecutive_failures >= self.p.max_consecutive_failures and self.ks.engage_unless_held(
-                f"bot: {self.consecutive_failures} consecutive tick failures", actor=ACTOR, ts=now):
+                f"bot: {self.consecutive_failures} consecutive internal failures", actor=ACTOR, ts=now):
             self._decision("engage_kill_switch", {"consecutive_failures": self.consecutive_failures,
                                                   "errors": rep.errors}, now)
             rep.engaged_kill_switch = True
@@ -234,7 +262,39 @@ class Bot:
 
     def _refresh_feed(self, now: float, rep: TickReport) -> None:
         self.feed.track(sorted(set(self.positions) | {p.symbol for p in self.plans.values()}))
-        self.feed.refresh(now)
+        try:
+            self.feed.refresh(now)
+        except TRANSIENT_FEED_ERRORS as e:
+            return self._feed_down(now, rep, f"{type(e).__name__}: {e}"[:300], type(e).__name__)
+        since = self.feed.outage_since if hasattr(self.feed, "outage_since") else None   # PublicFeed, between probes
+        if isinstance(since, (int, float)) and not isinstance(since, bool):
+            return self._feed_down(now, rep, "feed outage: waiting for the next probe", "outage")
+        if self.feed_down_since is not None:
+            self._feed_tick(now)
+            self._decision("feed_restored", {"since": self.feed_down_since, "outage_s": self.feed_outage_s}, now)
+            log.warning("bot: market data restored after %.0fs", self.feed_outage_s or 0.0)
+            rep.actions.append("feed_restored")
+            self.feed_down_since = self.feed_outage_s = self._feed_alerted = None
+
+    def _feed_tick(self, now: float) -> None:
+        """Accumulate the outage duration from forward clock movement only."""
+        step = now - self._feed_last
+        self.feed_outage_s = (self.feed_outage_s or 0.0) + (step if step > 0 else 0.0)
+        self._feed_last = now
+
+    def _feed_down(self, now: float, rep: TickReport, why: str, kind: str) -> None:
+        rep.degraded.append(f"feed:{kind}")
+        if self.feed_down_since is None:
+            self.feed_down_since, self.feed_outage_s, self._feed_last, self._feed_alerted = now, 0.0, now, None
+            self._decision("feed_down", {"since": now, "error": why}, now)
+        else:
+            self._feed_tick(now)
+        out = self.feed_outage_s or 0.0
+        if self._feed_alerted is None or out - self._feed_alerted >= FEED_ALERT_EVERY_S:
+            self._feed_alerted = out
+            log.warning("bot: market data down for %.0fs (since %.0f): %s", out, self.feed_down_since, why)
+            self._error("feed_down", f"market data down for {out:.0f}s (no new entries): {why}", now,
+                        {"since": self.feed_down_since, "outage_s": round(out, 1), "error": why})
 
     def _reconcile(self, now: float, rep: TickReport) -> None:
         self.oms.reconcile(now)
@@ -417,6 +477,8 @@ class Bot:
             return "kill_switch"
         if rep.errors:
             return "tick_degraded"
+        if self.feed_down_since is not None:
+            return "feed_down"
         return None
 
     def _evaluate(self, sym: str, bars: Sequence[Candle], now: float, block: str | None) -> tuple[Any, bool]:
@@ -821,8 +883,8 @@ class Bot:
             log.exception("bot: could not record %s", kind)
             self._error("audit", repr(e), now)
 
-    def _error(self, where: str, message: str, now: float) -> None:
+    def _error(self, where: str, message: str, now: float, payload: Any = None) -> None:
         try:
-            self.store.append_error(f"bot.{where}", message, ts=now)
+            self.store.append_error(f"bot.{where}", message, payload, ts=now)
         except Exception:
             log.exception("bot: could not record an error")

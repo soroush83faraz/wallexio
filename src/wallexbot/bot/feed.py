@@ -13,6 +13,12 @@ intended order size, taker fee from config) for the strategy's cost gate.
   universe is the top-N spot markets in the quote currency by 24h quote volume
   (`client.rank_universe`), refreshed daily and filtered by spread, visible ask depth and
   zero-volume runs.
+  Exchange-wide outage: a refresh whose every request failed raises `FeedError` and sets
+  `outage_since`. While it is set, a refresh sends at most ONE probe request (open positions
+  first), and only every poll_interval_s, doubling per failed probe up to `outage_probe_max_s`
+  (60 s), so a down or rate-limiting API is not hammered and a refresh stays short (the loop's
+  heartbeat cadence does not depend on how many symbols are watched). Any successful request
+  clears `outage_since`; normal polling resumes on the next refresh.
 - `ReplayFeed` drives the same interface from pre-loaded 1m candles and a synthetic book around
   the close of the last CLOSED 1m candle (tests, offline demo). `on_book` mirrors that book into a
   paper broker so fills happen at replay prices.
@@ -28,7 +34,7 @@ from typing import Callable, Iterable, Mapping, Protocol, Sequence
 from wallexbot.config import Config
 from wallexbot.data.aggregate import aggregate
 from wallexbot.data.candles import Candle
-from wallexbot.exchange.wallex_public import MAX_BARS_PER_REQUEST, Depth
+from wallexbot.exchange.wallex_public import MAX_BARS_PER_REQUEST, Depth, WallexDataError, WallexHTTPError
 from wallexbot.strategy.contract import MarketContext
 from wallexbot.types import Quote, SymbolRules, round_down
 
@@ -44,6 +50,12 @@ BookCallback = Callable[[str, list, list], object]   # (symbol, bids, asks), bes
 
 class FeedError(RuntimeError):
     """The feed could not refresh anything (every request of this refresh failed)."""
+
+
+# Market-data failures that mean "the exchange's public API is down / rate-limiting / answering
+# garbage", not a bug: the trading loop treats them as a degraded feed (bot/loop.py), never as a
+# tick failure. OSError covers ConnectionError, socket timeouts and URLError; TimeoutError is one.
+TRANSIENT_FEED_ERRORS: tuple[type[BaseException], ...] = (FeedError, WallexHTTPError, WallexDataError, OSError)
 
 
 class MarketFeed(Protocol):
@@ -110,6 +122,7 @@ def explode_bars(bars: Sequence[Candle], minutes: int = BAR_MINUTES) -> list[Can
 # ---------------------------------------------------------------------------- base
 class _FeedBase:
     config: Config
+    outage_since: float | None = None      # set while every request fails (PublicFeed); never set by replay
 
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -147,10 +160,13 @@ class FeedParams:
     zero_volume_lookback_min: int = 360
     max_zero_volume_run_min: int = 60
     universe_depth_notional: Decimal | None = None   # None: min_depth_multiple x risk.max_order_value
+    outage_probe_max_s: float = 60.0       # outage: probe backoff poll_interval_s, x2 per failure, capped here
 
     def __post_init__(self) -> None:
         if not 1 <= self.poll_interval_s <= 600 or self.candle_poll_s < MIN_S:
             raise ValueError("poll_interval_s in [1, 600], candle_poll_s >= 60")
+        if not self.poll_interval_s <= self.outage_probe_max_s <= 600:
+            raise ValueError("outage_probe_max_s in [poll_interval_s, 600]")
         if self.history_bars < 1 or self.max_requests_per_refresh < 1 or self.universe_oversample < 1:
             raise ValueError("history_bars, max_requests_per_refresh, universe_oversample must be >= 1")
 
@@ -164,6 +180,10 @@ class PublicFeed(_FeedBase):
         self.on_book = on_book
         self.universe_report: dict[str, str] = {}
         self.last_errors: list[str] = []
+        self.outage_since: float | None = None   # set by a refresh whose every request failed
+        self._probe_last: float | None = None
+        self._probe_fails = 0
+        self._budget = params.max_requests_per_refresh
         self._universe: list[str] = []
         self._universe_ts: float | None = None
         self._universe_try: float | None = None
@@ -206,11 +226,21 @@ class PublicFeed(_FeedBase):
         self._reanchor(now)
         self._spent = 0
         self.last_errors = []
+        self._budget = p.max_requests_per_refresh
+        if self.outage_since is not None:      # exchange down: one probe, with bounded backoff
+            delay = min(p.poll_interval_s * 2 ** min(self._probe_fails, 16), p.outage_probe_max_s)
+            if self._probe_last is not None and now - self._probe_last < delay:
+                return
+            self._probe_last = now
+            self._budget = 1
         attempted = ok = 0
         due = self._universe_ts is None or now - self._universe_ts >= p.universe_refresh_s
+        if self.outage_since is not None and (self._universe or self._extra):
+            due = False                        # the probe goes to a symbol; the universe waits
         if due and (self._universe_try is None or now - self._universe_try >= p.universe_retry_s):
             self._universe_try = now
             attempted += 1
+            self._spent = self._budget if self.outage_since is not None else self._spent
             try:
                 self._refresh_universe(now)
                 ok += 1
@@ -229,7 +259,13 @@ class PublicFeed(_FeedBase):
                 r = self._poll_candles(sym, now)
                 attempted += r is not None
                 ok += bool(r)
-        if attempted and not ok:
+        if ok:
+            self.outage_since, self._probe_last, self._probe_fails = None, None, 0
+        elif attempted:
+            if self.outage_since is None:
+                self.outage_since = self._probe_last = now
+            else:
+                self._probe_fails += 1
             raise FeedError("every market-data request of this refresh failed: " + ",".join(self.last_errors[:5]))
 
     # ---- internals
@@ -242,13 +278,15 @@ class PublicFeed(_FeedBase):
             self._universe_ts = now
         if self._universe_try is not None and not self._universe_try <= now:
             self._universe_try = now
+        if self._probe_last is not None and not self._probe_last <= now:
+            self._probe_last = now
         for timers in (self._depth_try, self._candle_try):
             for sym, last in list(timers.items()):
                 if not last <= now:
                     timers[sym] = now
 
     def _spend(self, n: int) -> bool:
-        if self._spent + n > self.params.max_requests_per_refresh:
+        if self._spent + n > self._budget:
             return False
         self._spent += n
         return True

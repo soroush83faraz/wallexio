@@ -107,7 +107,7 @@ def test_operator_engagement_is_never_released(rig, g):
     assert rig.ks.is_engaged()
 
 
-@pytest.mark.parametrize("actor, reason", [("bot", "bot: 5 consecutive tick failures"),
+@pytest.mark.parametrize("actor, reason", [("bot", "bot: 5 consecutive internal failures"),
                                            ("guardian", "guardian: 3 consecutive tick failures"),
                                            ("guardian", "guardian:flatten:2023-11-14-hard:drawdown_hard")])
 def test_non_transient_engagements_are_never_released(rig, g, actor, reason):
@@ -156,9 +156,9 @@ def test_hard_breach_flatten_supersedes_the_transient_engagement(rig, gstore, g)
 
 def test_bot_failure_engagement_supersedes_the_transient_one(rig, g):
     lose_heartbeat(rig, g)
-    assert KillSwitch(rig.store).engage_unless_held("bot: 5 consecutive tick failures", actor="bot",
+    assert KillSwitch(rig.store).engage_unless_held("bot: 5 consecutive internal failures", actor="bot",
                                                     ts=rig.clock())
-    assert not KillSwitch(rig.store).engage_unless_held("bot: 6 consecutive tick failures", actor="bot",
+    assert not KillSwitch(rig.store).engage_unless_held("bot: 6 consecutive internal failures", actor="bot",
                                                         ts=rig.clock())
     for _ in range(10):
         assert "release_kill_switch" not in step(rig, g, 15).actions

@@ -287,6 +287,7 @@ def summarize(store: Store, bot: Bot, ticks: int, guardian: InProcessGuardian | 
             "open_positions": {s: str(p.quantity) for s, p in sorted(positions.items()) if p.quantity > 0},
             "tracked": sorted(bot.positions), "kill_switch_engaged": bot.ks.is_engaged(),
             "consecutive_failures": bot.consecutive_failures, "profile": bot.profile,
+            "feed_down_since": bot.feed_down_since, "feed_outage_s": bot.feed_outage_s,
             "guardian": None if guardian is None else {"ticks": guardian.ticks, "failed": guardian.failed_ticks}}
 
 
@@ -464,8 +465,9 @@ def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
     def show(rep) -> None:
         if after_tick is not None:
             after_tick(rep)
-        if rep.actions or rep.errors:
-            print(f"tick ts={rep.ts:.0f} actions={rep.actions} errors={rep.errors}", flush=True)
+        if rep.actions or rep.errors:          # feed outages are logged every 5 min by the bot itself
+            down = "" if rep.feed_down_since is None else f" feed_down_s={rep.feed_outage_s or 0:.0f}"
+            print(f"tick ts={rep.ts:.0f} actions={rep.actions} errors={rep.errors}{down}", flush=True)
 
     try:
         balances = {cfg.quote_currency: balance}
