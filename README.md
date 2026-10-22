@@ -57,6 +57,7 @@ Run it (all offline except `bot --mode shadow`, which makes public GET requests 
 
 ## Documentation
 
+- [docs/HANDOFF.md](docs/HANDOFF.md): **start here when taking over**: state, quality gates, known limitations, what is not done, recommended next steps.
 - [docs/STRATEGY.md](docs/STRATEGY.md): S1 entry rules, S0 baseline, sizing, exits E1–E4 as implemented (placeholder parameters), the demo profile.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): modules, single-order-path rule, in-process guardian, AI boundary.
 - [docs/RISK.md](docs/RISK.md): limits, soft and hard breaches, guardian and flatten procedure, exit race, dust, clock steps, failure behaviour.

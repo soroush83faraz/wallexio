@@ -11,6 +11,8 @@ logs/
 runs/
 .pytest_cache/
 *.egg-info/
+build/
+dist/
 # secrets: any env-file variant, keys/certs; only the names-only template is tracked
 .env.*
 !.env.example

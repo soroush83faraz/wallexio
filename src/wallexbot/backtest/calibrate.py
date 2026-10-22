@@ -329,7 +329,7 @@ def render_calibration_markdown(cal: CostCalibration, headline_notional: str = "
           f"Quantiles: {d['method']['quantiles']}.", "",
           f"## Headline (order notional {headline_notional} USDT)", "",
           "| symbol | usable | samples | covered h | UTC hours | spread median / p90 (bps) | "
-          f"BUY slip vs mid median / p90 | SELL slip vs mid median / p90 | visible depth ask / bid median (USDT) |",
+          "BUY slip vs mid median / p90 | SELL slip vs mid median / p90 | visible depth ask / bid median (USDT) |",
           "|---|---|---|---|---|---|---|---|---|"]
     for s, e in sorted(d["symbols"].items()):
         if not e.get("samples"):
