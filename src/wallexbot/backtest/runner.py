@@ -80,13 +80,16 @@ DEFAULT_SYMBOLS = ("BTCUSDT", "ETHUSDT", "XRPUSDT", "XAUTUSDT", "USOONUSDT", "PE
 STRATEGIES = ("S0", "S1")
 EXITS = ("E1", "E2", "E3", "E4")
 PRE_REGISTERED_EXIT = "E4"
-# (label, taker rate, note). The primary one is the repo placeholder; the others are scenarios only.
-# Scenario note public_usdt_0.002 (docs/COSTS.md, public sources retrieved 2026-10-22): 0.002 is the
-# public "USDT pairs 0.2 %" figure and the API docs' fee example; 0.001 the 0.1 % offer / top tier.
-# Neither is our account's verified rate; labels and notes are left as they are.
+# (label, taker rate, note). None is our account's verified rate. The first ("primary", used to rank
+# exits and for the S1 gate summary) is the conservative 0.0035, the config default until 2026-10-22;
+# label keys are kept so new reports stay comparable with the historical reports/v2_* files.
+# 0.002 is the public "USDT pairs 0.2 %" figure (undated help page), the API docs' fee example and
+# the config default fees.taker_rate (docs/COSTS.md); 0.001 the 0.1 % offer / top tier.
 FEE_SCENARIOS = (
-    ("primary_0.0035", Decimal("0.0035"), "PLACEHOLDER taker fee (config fees.taker_rate), unverified"),
-    ("assumed_0.002", Decimal("0.002"), "ASSUMED fee scenario - real fee unverified"),
+    ("primary_0.0035", Decimal("0.0035"), "CONSERVATIVE scenario (former placeholder, above the public 0.2 %), "
+                                          "real fee unverified"),
+    ("assumed_0.002", Decimal("0.002"), "ASSUMED: documented public USDT-pair fee = config default "
+                                        "fees.taker_rate; our account's fee unverified"),
     ("assumed_0.001", Decimal("0.001"), "ASSUMED fee scenario - real fee unverified"),
 )
 SENSITIVITY_PARAMS = ("donchian_period", "ema_period", "roc_z_min", "volume_mult", "atr_pct_min", "atr_pct_max",
@@ -938,7 +941,7 @@ def render_summary_markdown(reports: Sequence[Mapping[str, Any]], title: str = "
     """One page over several grid reports (e.g. 15m and 60m): best/worst exit per strategy on train with its
     train and validation numbers at every fee, an objective evidence count, buy-and-hold and the S1 gate."""
     L = [f"# {title}", "", f"**{EXPLORATORY}**", "",
-         "Best / worst exit = highest / lowest TRAIN net return at the primary fee (0.0035, placeholder); the "
+         "Best / worst exit = highest / lowest TRAIN net return at the primary fee (0.0035, conservative); the "
          "validation numbers of that exit are therefore out-of-sample for the choice. Test segment NOT evaluated. "
          f"`(n<{MIN_MEANINGFUL_TRADES})` marks trade counts too small for any statistical statement.", ""]
     for r in reports:

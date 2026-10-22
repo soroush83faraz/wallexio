@@ -49,7 +49,7 @@ class ExitParams:
     volume_dry_ratio: Decimal = Decimal("0.5")
     partial_r: Decimal = Decimal("1")          # E4: sell partial_fraction at +1R
     partial_fraction: Decimal = Decimal("0.5")
-    fee_rate: Decimal = Decimal("0.0035")      # E4 breakeven+fees stop; placeholder, unverified
+    fee_rate: Decimal = Decimal("0.0035")      # E4 breakeven+fees stop; conservative, the bot passes config fee
     # E4: extra room for the exit's own price give-up (half spread + impact) on the breakeven stop,
     # in bps of the stop. 20 = the backtest's default 7.5 bps half spread + 12.5 bps impact
     # allowance. Callers derive it from their cost model: CostModel.exit_cost_bps(...).

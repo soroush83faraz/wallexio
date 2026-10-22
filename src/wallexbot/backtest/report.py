@@ -16,8 +16,8 @@ from wallexbot.backtest.engine import BacktestResult, Trade, to_canonical
 from wallexbot.backtest.metrics import compute_metrics
 
 DEFAULT_LIMITATIONS = (
-    "Simulation, not evidence of future profit. Fees (0.35% taker), minimum notional and spreads are "
-    "placeholders not verified against Wallex; fees are charged in quote although Wallex may charge "
+    "Simulation, not evidence of future profit. Fees (the run's taker rate), minimum notional "
+    "and spreads are placeholders not verified against Wallex; fees are charged in quote although Wallex may charge "
     "the received asset. Fills are next-bar-open or level-touch taker fills with a half-spread and a "
     "linear impact proxy from the previous bar's base volume times close (volume semantics "
     "unverified); queue position, partial fills, rejections, latency and order-book depth are not "

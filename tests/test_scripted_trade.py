@@ -22,9 +22,9 @@ def test_scripted_trade_end_to_end(tmp_path):
     db = tmp_path / "demo.db"
     out = run_scripted_trade(str(db))
     assert out["entry"].state is IntentState.FILLED and out["exit"].state is IntentState.FILLED
-    # buy 0.01 @ 60010 (fee 0.000035 BTC), sell 0.009965 @ 61200 (fee 0.35% in USDT)
-    proceeds = D("0.009965") * D("61200.00")
-    assert out["realized_pnl"] == proceeds * (1 - D("0.0035")) - D("600.10")
+    # default fee 0.2 %: buy 0.01 @ 60010 (fee 0.00002 BTC), sell 0.00998 @ 61200 (fee 0.2% in USDT)
+    proceeds = D("0.00998") * D("61200.00")
+    assert out["realized_pnl"] == proceeds * (1 - D("0.002")) - D("600.10")
     a = out["audit"]
     assert len(a["signals"]) == 1 and len(a["risk_decisions"]) == 2 and len(a["fills"]) == 2
     ids = {r["client_id"] for r in a["order_intents"]}

@@ -27,6 +27,14 @@ def test_default_loads():
     assert load_config(env={}).mode == "mock"
 
 
+def test_default_fee_is_the_documented_public_usdt_rate():
+    """0.2 % flat for USDT pairs (public, undated help page; the API docs' fee example) - not our
+    account's verified rate, which `doctor` reads from GET /v1/account/fee."""
+    cfg = load_config(env={})
+    assert (cfg.taker_rate, cfg.maker_rate) == (Decimal("0.002"), Decimal("0.002"))
+    assert "/v1/account/fee" in DEFAULT_PATH.read_text()
+
+
 def test_default_config_is_a_package_resource():
     from importlib import resources
     res = resources.files("wallexbot").joinpath("default_config.yaml")

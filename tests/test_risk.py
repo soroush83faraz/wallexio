@@ -145,8 +145,9 @@ def test_max_open_positions(engine):
 
 
 def test_cash_includes_fee_reserve(engine):
-    assert_ok(run(engine, account=replace(ACCOUNT, cash_free=D("603"))))   # 600.10 * 1.0035 = 602.20
-    assert_reject(run(engine, account=replace(ACCOUNT, cash_free=D("602"))), "insufficient_cash")
+    # default fee 0.2 %: 600.10 * 1.002 = 601.3002 must be free
+    assert_ok(run(engine, account=replace(ACCOUNT, cash_free=D("601.31"))))
+    assert_reject(run(engine, account=replace(ACCOUNT, cash_free=D("601.30"))), "insufficient_cash")
 
 
 def test_one_open_order_per_symbol(engine):

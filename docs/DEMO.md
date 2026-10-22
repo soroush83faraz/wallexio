@@ -54,7 +54,7 @@ Exploratory grid on train and validation only; the test segment is not evaluated
 .venv/bin/python -m wallexbot guardian --db /tmp/g_demo.db --mode mock --demo-db --ticks 3 --interval 1
 ```
 
-What the two replays produced on the local `data/history` (8 symbols, 2026-09-06 to 2026-10-21; PUMPUSDT data starts only in October) at this commit, each on a new database (the replay clock starts after a 120-bar warm-up, 2026-09-08 03:40):
+What the two replays produced (with the former 0.0035 fee default; at the current 0.002 default the demo run's fees and realized P&L differ and were not re-measured; strict S1 abstaining on the synthetic replay is checked by `tests/test_profiles.py`) on the local `data/history` (8 symbols, 2026-09-06 to 2026-10-21; PUMPUSDT data starts only in October) at this commit, each on a new database (the replay clock starts after a 120-bar warm-up, 2026-09-08 03:40):
 
 - strict, 400 ticks (about 6.7 simulated hours): 0 signals, 0 orders, kill switch not engaged. S1 abstains (`no_signal`); "no trades" is a valid outcome.
 - demo, 4000 ticks (about 2.8 simulated days, to 2026-09-10 22:19; under a minute of wall time): 1 signal (USOONUSDT), one LIMIT BUY and one LIMIT SELL, both filled; the position was closed after 45 minutes by the exit policy (`momentum_fail_roc`) at a realized loss of about 2.37 USDT (fee dust of 7.4e-7 USOON stays in `open_positions`). Kill switch never engaged, no guardian errors, 4000 guardian ticks, 0 failed. A symbol without data yet (PUMPUSDT) does not stop the run: only symbols held or with a live order are checked for feed staleness.

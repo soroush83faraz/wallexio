@@ -21,7 +21,8 @@ raises instead of silently breaking the identity. Only the impact ratio (a divis
 quantization round, and they happen before, in the caller's context.
 
 Conservative choices / unverified Wallex facts:
-- taker_rate 0.0035 is a PLACEHOLDER (config `fees.taker_rate`), not a verified Wallex fee.
+- taker_rate default 0.0035 is a CONSERVATIVE scenario (the former config placeholder; the bot's config
+  `fees.taker_rate` is now the documented public 0.002), not a verified Wallex fee.
 - Real Wallex may charge the fee in the received asset (base on buys). We charge the same rate in
   quote on the notional; the value is equivalent but quantities received may differ slightly.
 - Take-profit levels are also charged as taker fills with spread + impact (a resting limit would
@@ -77,8 +78,8 @@ class FillCost:
 
 @dataclass(frozen=True)
 class CostModel:
-    taker_rate: Decimal = Decimal("0.0035")     # placeholder, UNVERIFIED on Wallex
-    maker_rate: Decimal = Decimal("0.0035")     # placeholder, UNVERIFIED; not used for fills
+    taker_rate: Decimal = Decimal("0.0035")     # conservative scenario, UNVERIFIED on Wallex
+    maker_rate: Decimal = Decimal("0.0035")     # conservative scenario, UNVERIFIED; not used for fills
     half_spread_bps: Decimal = Decimal("7.5")
     impact_k: Decimal = Decimal("0.2")
     impact_cap_bps: Decimal = Decimal("50")
