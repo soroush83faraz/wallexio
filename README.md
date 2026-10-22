@@ -42,7 +42,7 @@ Requires Python 3.12. No credentials are needed or used.
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest -q
 ```
 
-Verified on the code at this commit: `pytest -q` reports 2000 passed.
+Verified on the code at this commit: `pytest -q` reports 2015 passed.
 
 Run it (all offline except `bot --mode shadow`, which makes public GET requests only):
 
