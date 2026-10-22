@@ -40,7 +40,8 @@ These are design choices, not measured facts:
 
 - Fixed split (code constants, not tuned): 50% train / 25% validation / remainder test by 15m bar time, 300-bar embargo (= the strategies' indicator window) between segments, 300-bar warm-up taken from the embargo, entries from the segment's first bar. Warm-up equity points are trimmed before metrics.
 - Engine cooldown hook: 3 consecutive losses block entries for 60 min; per symbol 8 bars after an exit (2 after a win). The "same breakout level after a stop-out" and "trend intact" refinements of `CooldownTracker` are not modelled.
-- The runner rounds trailing/breakeven stop and take-profit levels DOWN to the price tick (`TickExit`). Without it, levels computed with Decimal division carry ~60 digits and the engine's exact cost-attribution check aborts the run (an engine latent issue; engine and strategy code were not edited).
+- The runner still wraps exit policies in `TickExit`, which rounds trailing/breakeven stop and take-profit levels DOWN to the price tick. It was added when the engine aborted on ~60-digit Decimal levels; the engine (`bt-0.2`) now puts levels on the tick itself, so the wrapper is redundant but kept.
+- `reports/` was produced before that fix (`bt-0.1`), with placeholder costs, from the train and validation segments only. Treat `reports/backtest_grid.md` as exploratory, placeholder costs, pre-fix engine; to be re-run.
 - The runner never calls `TestSetGuard`. `python -m wallexbot backtest --final-test --params-file frozen.json [--ledger PATH]` is the single-use test evaluation: it refuses without a valid params file (exit 2), validates the file, consumes the guard (ledger default `reports/test_set_ledger.jsonl`) before running, writes `reports/backtest_final_test.{json,md}`, and a second use is refused (exit 3). Frozen file: `{"strategy": "S0|S1", "exit": "E1..E4", "taker_rate": "0.0035", "momentum_params": {...}, "exit_params": {...}}`. Thresholds for judging the result must be written down before it is used.
 - `--arm-live` is refused on every command; live is not available in this build.
 
@@ -61,7 +62,7 @@ All of the following are required. The plan does not give numeric pass threshold
 
 1. Backtest on train and validation completed with frozen code and config.
 2. Single test-set evaluation completed and recorded, with thresholds fixed in advance.
-3. Shadow run of 24–48 hours using `ShadowBroker`, which logs decisions and sends no orders (**not implemented**).
+3. Shadow run of 24–48 hours (`python -m wallexbot bot --mode shadow`, `ShadowBroker`: sends no orders). The code exists; **no shadow run has been made**.
 4. Doctor green (`python -m wallexbot doctor`, needs `WALLEX_API_KEY_READ`; not yet run against Wallex).
 5. Explicit go-ahead from the user.
 6. Credentials and arming conditions met (see CONFIG_ENV.md).

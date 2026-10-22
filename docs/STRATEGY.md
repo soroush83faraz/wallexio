@@ -2,7 +2,7 @@
 
 Status: **S1 entry engine, S0 baseline, sizing and exit policies E1-E4 are implemented and unit-tested. They have not been backtested.** Every numeric default below is a **placeholder**, to be chosen on train/validation data only (never the test set). No results are reported anywhere.
 
-Code: `strategy/{momentum,config,features,indicators,cooldown,trend_baseline,lookahead,sizing,exits,contract}.py`. Not implemented: S2 (S1 plus a trend filter), any ICT-based strategy, and the bot loop that would call the engines live.
+Code: `strategy/{momentum,config,features,indicators,cooldown,trend_baseline,lookahead,sizing,exits,contract}.py`. Not implemented: S2 (S1 plus a trend filter), any ICT-based strategy, and any validated parameter set. The bot loop (`bot/`) calls S1 with E4 live in mock and shadow modes only.
 
 ## Scope
 

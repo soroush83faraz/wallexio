@@ -1,17 +1,21 @@
 # Architecture
 
-Status: mock vertical slice plus strategy, backtest, guardian, history downloader and an unverified private client. All of it is tested against the mock or synthetic data only.
+Status: mock and shadow vertical slices run end to end (bot loop, ShadowBroker, optional shadow-only AI advisor, CLI), plus strategy, backtest, guardian, history downloader, recorder and an unverified private client. All of it is tested against the mock, synthetic or recorded data only.
 
 Implemented modules (under `src/wallexbot/`):
 
 - `exchange/`: `wallex_public` (GET only), `wallex_private` (`WallexBroker`, `WallexAccountReader`; unverified, needs arming), `mock_wallex` (incl. `depth()`), `ratelimit`, `auth` (host pin, arming checks, `is_live_armed_token`), `base` (Broker protocol).
 - `data/`: `candles`, `aggregate`, `quality`, `recorder`, `history` (resumable 1m downloader, writes `data/history/`).
 - `strategy/`: `contract`, `indicators`, `features`, `config`, `momentum` (S1), `trend_baseline` (S0), `cooldown`, `sizing`, `exits` (E1-E4), `lookahead`.
-- `backtest/`: `engine`, `costs`, `metrics`, `splits`, `sensitivity`, `report`.
+- `backtest/`: `engine`, `costs`, `metrics`, `splits`, `sensitivity`, `report`, `runner` (behind `wallexbot backtest`).
+- `bot/`: `feed` (PublicFeed for live public data, ReplayFeed for recorded candles), `state` (persisted positions, plans, cooldown), `loop` (the per-tick `Bot`), `advice` (advisor gate: timeout, abstain on any failure), `main` (mock/shadow entry; live refused). Orders leave only through `pipeline.route_to_oms`.
+- `ai/`: `schema` (strict context and verdict types), `advisor` (`NullAdvisor`, `AnthropicAdvisor`, `LoggedAdvisor`, `make_advisor`), `evaluate`. Imports nothing from the order path. `advisor_bridge.py` (top level) adapts the bot's dict context to it and persists verdicts as `audit_events` (actor `advisor`).
+- `exchange/shadow.py`: `ShadowBroker`, a Broker that answers from memory using public depth snapshots; `step()` matches resting orders; optional JSONL journal.
+- `cli.py`, `__main__.py`: `demo`, `backtest`, `doctor`, `guardian`, `bot`.
 - `guardian/`: `monitor`, `flatten`, `main` (demo CLI, mock/shadow only).
-- `risk/` (`engine`, `killswitch`), `oms.py`, `store.py` (incl. `audit_events` table and heartbeat), `pipeline.py` (scripted mock round trip, `build_mock_broker`), `doctor.py` (read-only preflight; no CLI), `config.py`, `types.py`, `redact.py`.
+- `risk/` (`engine`, `killswitch`), `oms.py`, `store.py` (incl. `audit_events` table and heartbeat), `pipeline.py` (scripted mock round trip, `build_mock_broker`), `doctor.py` (read-only preflight, `wallexbot doctor`), `config.py`, `types.py`, `redact.py`.
 
-**Not implemented**: `cli.py`, the bot loop (`bot/`), `ShadowBroker`, the AI advisor (`ai/` is an empty package). Items marked *planned* in the diagram do not exist.
+**Not implemented**: any live broker wiring (the CLI and the bot refuse live). The diagram marks the live broker as *planned*.
 
 ## Module diagram
 
@@ -42,9 +46,9 @@ Implemented modules (under `src/wallexbot/`):
                       |                          ^
                       v                          | reads audit store
             +---------+---------+        +-------+----------+
-            | broker (mock now; |        | store.py         |
-            | shadow, live      |        |  SQLite WAL,     |
-            | planned)          |        |  append-only,    |
+            | broker (mock,     |        | store.py         |
+            | shadow; live is   |        |  SQLite WAL,     |
+            | not wired)        |        |  append-only,    |
             +-------------------+        |  redacted writes |
                                          +-------+----------+
                                                  ^
@@ -56,7 +60,7 @@ Implemented modules (under `src/wallexbot/`):
                        |  breach                                   |
                        +-------------------------------------------+
 
-   bot/main.py and cli.py (planned, absent) wire the modules together.
+   bot/main.py (via cli.py `bot`) wires the modules together; the guardian is a separate process.
    backtest/ replays the strategy engines and exit policies on stored candles (it has its own
    simulated fills and a RiskConfig-based loss check, not the OMS).
 ```
@@ -87,8 +91,8 @@ Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, i
 ## AI boundary
 
 - The AI advisor is **advisory only**. It can veto an entry or size it down. It cannot create orders, increase size, or change limits.
-- The AI package (`src/wallexbot/ai/`) must not import `risk`, the broker, or the OMS. Planned enforcement: `tests/test_agents_boundary.py`.
-- It is **off in the critical path by default**. Shadow mode records its decisions without acting on them.
+- The AI package (`src/wallexbot/ai/`) must not import `risk`, the broker, or the OMS. Enforced by `tests/test_ai_isolation.py` and `tests/test_bot_ast.py`.
+- It is **off in the critical path by default**. Shadow mode (`bot --advisor shadow`) records its verdicts without acting on them; the wiring never sets `apply=True`.
 - It may also produce explanations for the demo.
 - Only `ANTHROPIC_API_KEY` is relevant to it (see CONFIG_ENV.md).
 

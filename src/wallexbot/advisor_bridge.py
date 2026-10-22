@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Mapping
 
-from wallexbot.ai.advisor import Advisor, NullAdvisor, make_advisor
+from wallexbot.ai.advisor import Advisor, LoggedAdvisor, NullAdvisor, make_advisor
 from wallexbot.ai.schema import AdvisorContext
 from wallexbot.redact import load_secret
 from wallexbot.store import Store
@@ -62,8 +62,7 @@ class BotAdvisorBridge:
         return {"decision": v.decision, "size_multiplier": str(v.size_multiplier), "reason": v.rationale}
 
     def drain(self) -> list[dict[str, Any]]:
-        fn = getattr(self.advisor, "drain", None)
-        return fn() if callable(fn) else []
+        return self.advisor.drain() if isinstance(self.advisor, LoggedAdvisor) else []
 
 
 class AdvisorRecorder:

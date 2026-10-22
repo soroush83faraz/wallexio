@@ -42,7 +42,7 @@ Retry policy (implemented for GET only, in `exchange/wallex_public.py`): a GET i
 
 ## Live path is blocked without arming
 
-`submit_order` and `cancel_order` raise `AuthError` before any I/O unless the broker was built with the trade key **and** the exact token object returned by `assert_live_armed()` (an identity check via `is_live_armed_token`; an equal-looking `Secret` arms nothing). Reads use the read key. Two identical keys are refused. Every URL passes the host allow-list (`api.wallex.ir` only; fund-movement paths refused). There is no CLI or bot loop that builds a live broker. `wallexbot.doctor.run_doctor` performs GET-only checks (host pin, read key, balances, fee, open orders, not-found lookup shape, clock skew, config, `.env` ignored); it has no CLI yet and has not been run against Wallex.
+`submit_order` and `cancel_order` raise `AuthError` before any I/O unless the broker was built with the trade key **and** the exact token object returned by `assert_live_armed()` (an identity check via `is_live_armed_token`; an equal-looking `Secret` arms nothing). Reads use the read key. Two identical keys are refused. Every URL passes the host allow-list (`api.wallex.ir` only; fund-movement paths refused). The CLI and the bot loop never build a live broker (mock and shadow only). `wallexbot.doctor.run_doctor` performs GET-only checks (host pin, read key, balances, fee, open orders, not-found lookup shape, clock skew, config, `.env` ignored); `python -m wallexbot doctor` runs it; it has not been run against Wallex.
 
 ## Access model
 

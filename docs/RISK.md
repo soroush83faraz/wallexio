@@ -1,6 +1,6 @@
 # Risk
 
-Status: limits are defined in `config/default.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian (`guardian/monitor.py`, `flatten.py`, `main.py`) and the hard-breach flatten procedure are implemented and tested against `MockWallex` only (`tests/test_guardian_*.py`). They have never run against the real exchange. There is no bot loop yet, so nothing feeds the strategy heartbeat in a real deployment.
+Status: limits are defined in `config/default.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian (`guardian/monitor.py`, `flatten.py`, `main.py`) and the hard-breach flatten procedure are implemented and tested against `MockWallex` only (`tests/test_guardian_*.py`). They have never run against the real exchange. The bot loop (`bot/`, mock and shadow only) writes the strategy heartbeat each tick; a separately started guardian on the same database watches it. In mock/replay runs the paper broker lives inside the bot process, so that guardian sees its own demo broker, not the bot's; the ledger, heartbeat and kill switch are shared through the DB.
 
 ## Limits
 
