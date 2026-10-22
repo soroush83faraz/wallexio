@@ -13,6 +13,9 @@ key, and it never arms anything (the config is loaded with cli_armed=False). Che
   balances, fee, open_orders
                     the private GETs succeed AND parse with the adapter's fail-closed parsers,
                     which is how the unverified response shapes get checked
+  fee_vs_config     the account's highest maker/taker rate on the configured quote currency is NOT above
+                    fees.maker_rate / fees.taker_rate (a config fee below the real one makes every cost
+                    estimate optimistic, so that is a FAIL)
   not_found_lookup  GET of a random client_id reads as "not found" (404 + JSON success:false), the
                     shape reconcile relies on to tell "never created" from "lookup failed"
   clock_skew        local clock minus the server's Date header (SKIP when there is none)
@@ -43,7 +46,7 @@ __all__ = ["CheckResult", "DoctorReport", "FAIL", "PASS", "SKIP", "UNVERIFIABLE"
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-NETWORK_CHECKS = ("balances", "fee", "open_orders", "not_found_lookup")
+NETWORK_CHECKS = ("balances", "fee", "fee_vs_config", "open_orders", "not_found_lookup")
 # Must be refused by assert_host_allowed (checked locally; never sent anywhere).
 _MUST_REFUSE = ("https://api.wallex.ir.example.com/v1/account/balances",
                 "http://api.wallex.ir/v1/account/balances",
@@ -121,7 +124,9 @@ def run_doctor(read_key: Secret | None, transport: Transport | None = None, *,
         checks.append(CheckResult("clock_skew", SKIP, "no server response to compare against"))
     else:
         checks.append(_network("balances", lambda: f"{len(reader.balances())} assets parsed"))
-        checks.append(_network("fee", lambda: _fee_detail(reader)))
+        fees: dict = {}                       # one GET /fee shared by both fee checks
+        checks.append(_network("fee", lambda: _fee_detail(reader, fees)))
+        checks.append(_fee_vs_config(fees, config_path, env))
         checks.append(_network("open_orders",
                                lambda: f"{len(reader.open_orders())} open orders parsed"))
         checks.append(_not_found_lookup(reader))
@@ -181,11 +186,33 @@ def _network(name: str, probe: Callable[[], str]) -> CheckResult:
         return CheckResult(name, FAIL, _m(e))
 
 
-def _fee_detail(reader: WallexAccountReader) -> str:
-    table = reader.fee_table()
+def _fee_detail(reader: WallexAccountReader, fees: dict) -> str:
+    table = fees["table"] = reader.fee_table()
     maker = max(r.maker for r in table.values())
     taker = max(r.taker for r in table.values())
     return f"{len(table)} markets; highest maker {maker}, highest taker {taker} (as fractions)"
+
+
+def _fee_vs_config(fees: dict, path: Path | str | None,
+                   env: Mapping[str, str] | None) -> CheckResult:
+    """FAIL when the real fee on our quote currency exceeds the fee the cost model assumes."""
+    table = fees.get("table")
+    if table is None:
+        return CheckResult("fee_vs_config", FAIL, "the fee table could not be read (see 'fee')")
+    try:
+        cfg = load_config(path, env=os.environ if env is None else env, cli_armed=False)
+    except Exception as e:  # noqa: BLE001
+        return CheckResult("fee_vs_config", FAIL, _m(f"config did not load ({_m(e)})"))
+    rows = [r for sym, r in table.items() if sym.endswith(cfg.quote_currency)]
+    if not rows:
+        return CheckResult("fee_vs_config", FAIL, f"no {cfg.quote_currency} market in the fee table")
+    maker, taker = max(r.maker for r in rows), max(r.taker for r in rows)
+    detail = (f"{cfg.quote_currency} markets: account maker {maker} / taker {taker}; "
+              f"config maker {cfg.maker_rate} / taker {cfg.taker_rate}")
+    if maker > cfg.maker_rate or taker > cfg.taker_rate:
+        return CheckResult("fee_vs_config", FAIL, detail + ". The configured fee is BELOW the "
+                           "account's: raise fees.* in the config, then re-run the backtests")
+    return CheckResult("fee_vs_config", PASS, detail)
 
 
 def _not_found_lookup(reader: WallexAccountReader) -> CheckResult:

@@ -28,7 +28,7 @@ FAKE_TRADE_KEY = "FAKEtestDt7Wx2Yz4Ab6Cd8Ef1Gh"
 DATE = "Thu, 22 Oct 2026 08:00:00 GMT"
 SERVER_TS = email.utils.parsedate_to_datetime(DATE).timestamp()
 READ_PATHS = {"/v1/account/balances", "/v1/account/fee", "/v1/account/openOrders"}
-ALL_CHECKS = ["host_pin", "read_key", "balances", "fee", "open_orders", "not_found_lookup",
+ALL_CHECKS = ["host_pin", "read_key", "balances", "fee", "fee_vs_config", "open_orders", "not_found_lookup",
               "clock_skew", "config", "dotenv_ignored", "repo_secret_scan"]
 
 
@@ -92,9 +92,9 @@ class FakeReadApi:
                 "BTC": balance_row("BTC", "0.00000000", "0.00000000")}})
         if path == "/v1/account/fee":
             return 200, got, envelope({
-                "BTCUSDT": {"makerFeeRate": "0.00200000", "takerFeeRate": "0.00250000",
+                "BTCUSDT": {"makerFeeRate": "0.00200000", "takerFeeRate": "0.00200000",
                             "recent_days_sum": 250000000.0},
-                "ETHUSDT": {"makerFeeRate": "0.00300000", "takerFeeRate": "0.00350000",
+                "ETHUSDT": {"makerFeeRate": "0.00100000", "takerFeeRate": "0.00200000",
                             "recent_days_sum": 0}})
         if path == "/v1/account/openOrders":
             return 200, got, envelope({"orders": []})
@@ -142,7 +142,8 @@ def test_all_green_and_strictly_read_only():
     assert len(probes) == 1 and set(paths) - set(probes) == READ_PATHS and len(paths) == 4
     assert all(headers["X-API-Key"] == FAKE_READ_KEY for _, _, headers, _ in api.calls)
     assert report.by_name("balances").detail == "2 assets parsed"
-    assert "highest maker 0.003, highest taker 0.0035" in report.by_name("fee").detail
+    assert "highest maker 0.002, highest taker 0.002" in report.by_name("fee").detail
+    assert report.by_name("fee_vs_config").status == PASS
     assert "+1.5s" in report.by_name("clock_skew").detail
     assert report.by_name("config").detail == "loads fail-closed; mode=mock (not live)"
 
@@ -309,3 +310,39 @@ def test_doctor_source_has_no_write_or_arming_path():
     used |= {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
     assert not used & {"submit_order", "cancel_order", "WallexBroker", "assert_live_armed",
                        "is_live_armed_token", "TRADE_KEY_ENV"}
+
+
+# ----------------------------------------------------------------------------- fee vs config
+def _fee_api(rows: dict) -> "FakeReadApi":
+    return FakeReadApi(overrides={"/v1/account/fee": (200, envelope(rows))})
+
+
+def _fee_row(maker: str, taker: str) -> dict:
+    return {"makerFeeRate": maker, "takerFeeRate": taker, "recent_days_sum": 0}
+
+
+def test_fee_above_config_fails_and_says_to_raise_the_config():
+    report = doctor(_fee_api({"BTCUSDT": _fee_row("0.002", "0.0025")}))
+    check = report.by_name("fee_vs_config")
+    assert check.status == FAIL and "BELOW" in check.detail and not report.ok
+
+
+def test_maker_above_config_also_fails():
+    assert doctor(_fee_api({"BTCUSDT": _fee_row("0.003", "0.002")})).by_name("fee_vs_config").status == FAIL
+
+
+def test_fee_equal_or_below_config_passes():
+    for maker, taker in (("0.002", "0.002"), ("0.001", "0.0005")):
+        report = doctor(_fee_api({"BTCUSDT": _fee_row(maker, taker)}))
+        assert report.by_name("fee_vs_config").status == PASS
+
+
+def test_only_the_configured_quote_currency_counts():
+    rows = {"BTCUSDT": _fee_row("0.002", "0.002"), "BTCTMN": _fee_row("0.01", "0.01")}
+    assert doctor(_fee_api(rows)).by_name("fee_vs_config").status == PASS
+    assert doctor(_fee_api({"BTCTMN": _fee_row("0.001", "0.001")})).by_name("fee_vs_config").status == FAIL
+
+
+def test_fee_check_fails_when_the_fee_table_cannot_be_read():
+    api = FakeReadApi(overrides={"/v1/account/fee": (200, envelope([]))})
+    assert doctor(api).by_name("fee_vs_config").status == FAIL

@@ -40,7 +40,7 @@ From `src/wallexbot/default_config.yaml`, shipped inside the wheel (a plain `pip
 | `risk.drawdown_hard_pct` | `12` | |
 | `risk.consecutive_loss_cooldown` | `3` | |
 | `risk.min_notional` | `5` | Placeholder, unverified. |
-| `fees.taker_rate` | `0.002` | Flat 0.2 % for USDT pairs per a public, undated Wallex help page (and the API docs' fee example). Tier/volume dependent; our account's rate is unverified: check `GET /v1/account/fee` with `doctor` before trusting it. Was `0.0035` (an unverified planning assumption). |
+| `fees.taker_rate` | `0.002` | Flat 0.2 % for USDT pairs per a public, undated Wallex help page (and the API docs' fee example). Tier/volume dependent; our account's rate is unverified: run `doctor` before trusting it: its `fee_vs_config` check FAILS when the account's highest maker/taker rate on the configured quote currency is above `fees.*`. Was `0.0035` (an unverified planning assumption). |
 | `fees.maker_rate` | `0.002` | Same source and caveat as `fees.taker_rate`. |
 
 Risk limits are explained in RISK.md. Strategy and exit parameters are **not** in the YAML: they are dataclass defaults in `strategy/config.py` (`MomentumParams`), `strategy/exits.py` (`ExitParams`) and `backtest/costs.py` (`CostModel`), all unvalidated placeholders (see STRATEGY.md). Guardian settings (`GuardianConfig`, `FlattenConfig`) are code defaults too (see RISK.md).
