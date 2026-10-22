@@ -42,11 +42,11 @@ from wallexbot.bot.state import (ACTOR, EXIT_PREFIX, BotState, EntryPlan, ExitRe
                                  exit_prefix, exit_signal_id)
 from wallexbot.config import Config
 from wallexbot.data.candles import Candle
+from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.pipeline import cancel_open_intent, route_to_oms, snapshot_account
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.strategy.config import MomentumParams
 from wallexbot.strategy.cooldown import CooldownTracker
-from wallexbot.strategy.sizing import min_notional_for
 from wallexbot.types import TERMINAL_STATES, IntentState, OrderIntent, OrderType, Position, Quote, Side, round_down
 
 S = IntentState
@@ -676,12 +676,12 @@ class Bot:
         return qty * self._mark(sym, fallback) < min_notional_for(rules, self.cfg.risk)
 
     def _is_dust(self, sym: str, pos: Position) -> bool:
-        """Nothing sellable: below one amount step, or worth less than the minimum notional."""
+        """Nothing sellable (the shared rule, wallexbot/dust.py): below one amount step, or worth
+        less than the minimum notional at the mark (bid, else the average entry price)."""
         rules = self.risk.rules.get(sym)
         if rules is None:
             return pos.quantity <= 0
-        q = round_down(pos.quantity, rules.amount_precision)
-        return q <= 0 or self._below_min(sym, q, pos.avg_price)
+        return is_dust(pos.quantity, rules, self._mark(sym, pos.avg_price), min_notional_for(rules, self.cfg.risk))
 
     def _sells_in_flight(self, sym: str) -> bool:
         return any(r.intent.symbol == sym and r.intent.side is Side.SELL

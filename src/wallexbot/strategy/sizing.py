@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal, localcontext
 
 from wallexbot.config import RiskConfig
+from wallexbot.dust import min_notional_for  # noqa: F401  (re-exported: one minimum-notional rule)
 from wallexbot.types import SymbolRules, round_down
 
 LOW_SCORE = Decimal("0.7")
@@ -44,12 +45,6 @@ class SizingResult:
     @property
     def ok(self) -> bool:
         return self.qty > 0
-
-
-def min_notional_for(rules: SymbolRules, risk: RiskConfig) -> Decimal:
-    if rules.min_notional is None:
-        return risk.min_notional
-    return max(rules.min_notional, risk.min_notional)
 
 
 def size_position(equity: Decimal, entry: Decimal, stop: Decimal, rules: SymbolRules,

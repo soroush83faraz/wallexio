@@ -13,6 +13,7 @@ One tick:
    wins), the high-water mark is appended when exceeded. Both are written only from fresh,
    fully marked data, so a stale feed cannot set them.
 4. Conditions:
+   Exposure (what is "held") ignores dust under the shared rule (wallexbot/dust.py).
    - soft breach (RiskEngine.breaches)                       -> kill switch (entries off)
    - hard breach                                             -> flatten_all(hard=True)
    - exchange base balance != OMS ledger beyond tolerance,
@@ -37,6 +38,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Sequence
 
+from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.guardian.flatten import ACTOR, FlattenConfig, FlattenResult, flatten_all
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.types import IntentState, Side
@@ -118,8 +120,7 @@ class Guardian:
             rep.conditions.append("future_quote_ts:" + ",".join(future_dated))
         rules = self.risk.rules
 
-        held = sorted(s for s, r in rules.items()
-                      if self._total(balances, r.base) > 0 or self._qty(positions, s) > 0)
+        held = sorted(s for s, r in rules.items() if not self._dust(s, r, balances, positions, quotes))
         watch = held or sorted(rules)
         feed_age = max((now - self._last_fresh.get(s, self.started_at) for s in watch), default=0.0)
         if feed_age > self.max_age:
@@ -289,6 +290,16 @@ class Guardian:
             self.oms.reconcile(now=now)
         except Exception as e:
             self._error("guardian.monitor", f"reconcile failed: {e!r}", now)
+
+    def _dust(self, sym: str, rules, balances, positions, quotes) -> bool:
+        """Flat for exposure purposes: exchange total AND ledger quantity are dust under the shared
+        rule (wallexbot/dust.py), marked at the bid (else the ledger's average price)."""
+        pos = positions.get(sym)
+        q = quotes.get(sym)
+        mark = q.bid if q is not None else (pos.avg_price if pos is not None else None)
+        floor = min_notional_for(rules, self.risk.config.risk)
+        return all(is_dust(qty, rules, mark, floor)
+                   for qty in (self._total(balances, rules.base), self._qty(positions, sym)))
 
     @staticmethod
     def _total(balances, asset: str) -> Decimal:

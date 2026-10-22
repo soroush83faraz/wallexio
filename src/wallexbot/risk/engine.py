@@ -31,6 +31,7 @@ from decimal import Decimal
 from typing import Any, Callable, Mapping, Sequence
 
 from wallexbot.config import Config
+from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.types import OrderIntent, OrderType, Position, Quote, Side, SymbolRules, round_down
 
 _HUNDRED = Decimal(100)
@@ -178,7 +179,8 @@ class RiskEngine:
             run("max_position", lambda: self._position_limit(intent, quote, account, positions, notional))
             run("max_exposure", lambda: self._exposure_limit(intent, quote, account, positions,
                                                              open_orders, notional))
-            run("max_open_positions", lambda: self._open_positions_limit(intent, positions, open_orders))
+            run("max_open_positions", lambda: self._open_positions_limit(intent, quote, account, positions,
+                                                                         open_orders))
             fee_rate = max(cfg.taker_rate, cfg.maker_rate)
             run("cash", lambda: "insufficient_cash"
                 if notional * (1 + fee_rate) > account.cash_free else None)
@@ -279,12 +281,21 @@ class RiskEngine:
         pct = (held + pending + notional) / account.equity * _HUNDRED
         return "above_max_exposure_pct" if pct > self.config.risk.max_exposure_pct else None
 
-    def _open_positions_limit(self, intent, positions, open_orders) -> str | None:
-        held = {s for s, p in positions.items() if p.quantity > 0}
+    def _open_positions_limit(self, intent, quote, account, positions, open_orders) -> str | None:
+        """Dust (wallexbot/dust.py: below one amount step or min notional at the mark) is flat;
+        a symbol without rules counts whenever its quantity is positive (unknown => fail closed)."""
+        held = {s for s, p in positions.items() if p.quantity > 0 and not self._is_dust(s, p, quote, account)}
         held |= {o.symbol for o in open_orders if o.side is Side.BUY}
         if intent.symbol not in held and len(held) >= self.config.risk.max_open_positions:
             return "max_open_positions"
         return None
+
+    def _is_dust(self, symbol: str, pos: Position, quote: Quote, account: AccountState) -> bool:
+        rules = self.rules.get(symbol)
+        if rules is None:
+            return False
+        return is_dust(pos.quantity, rules, self._mark(symbol, quote, account, pos),
+                       min_notional_for(rules, self.config.risk))
 
     def _cooldown(self, account: AccountState, now: float) -> str | None:
         """Cooldown after N consecutive losses, `cooldown_s` from the latest loss.

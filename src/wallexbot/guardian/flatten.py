@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Sequence
 
+from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.oms import OPEN_INTENT_STATES, is_young_proposed
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.store import IntentRecord
@@ -82,7 +83,7 @@ class FlattenConfig:
     # (otherwise their locked base could not be sold, or an unlocked stop could fire afterwards).
     cancel_protective_stops: bool = True
     dry_run: bool = False                           # shadow mode: plan and audit, no broker writes
-    dust_notional: Decimal | None = None            # None: rules.min_notional or risk.min_notional
+    dust_notional: Decimal | None = None            # None: dust.min_notional_for(rules, risk config)
 
     def __post_init__(self) -> None:
         """Bounded work depends on these: refuse configs that would make a wait unbounded."""
@@ -334,21 +335,17 @@ class _Flattener:
                 "sellable": round_down(max(min(free, ledger_qty - committed), _ZERO), r.amount_precision)}
 
     def _dust(self, sym: str, qty: Decimal, mark: Decimal) -> bool:
-        r = self.rules[sym]
-        if round_down(qty, r.amount_precision) <= 0:
-            return True
-        return mark > 0 and qty * mark < self._min_notional(sym)
+        """The shared dust rule (wallexbot/dust.py)."""
+        return is_dust(qty, self.rules[sym], mark, self._min_notional(sym))
 
     def _min_notional(self, sym: str) -> Decimal:
         if self.cfg.dust_notional is not None:
             return self.cfg.dust_notional
-        r = self.rules[sym]
-        if r.min_notional is not None:
-            return r.min_notional
         try:
-            return self.oms.risk.config.risk.min_notional
+            return min_notional_for(self.rules[sym], self.oms.risk.config.risk)
         except Exception:
-            return _ZERO
+            r = self.rules[sym]
+            return r.min_notional if r.min_notional is not None else _ZERO
 
     def _final_status(self, sym: str, snap: dict[str, Decimal], out: SymbolOutcome) -> SymbolOutcome | None:
         out.remaining = snap["total"]
