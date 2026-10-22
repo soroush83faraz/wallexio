@@ -21,7 +21,7 @@ from wallexbot.exchange.mock_wallex import MockClock
 from wallexbot.guardian.main import InProcessGuardian, demo_db_problem
 from wallexbot.guardian.main import main as guardian_main
 from wallexbot.store import Store
-from wallexbot.types import Side
+from wallexbot.types import IntentState, Side
 
 
 def _replay_dir(tmp_path, cont=WINNER):
@@ -249,3 +249,30 @@ def test_inprocess_guardian_tick_never_raises(tmp_path):
     assert gd.failed_ticks == 2 and rig.ks.is_engaged()            # fail closed: entries off
     gd.close()
     rig.close()
+
+
+# ---------------------------------------------------------------------------- late listing (DEMO replay)
+def test_replay_with_a_late_listed_symbol_keeps_trading_the_others(tmp_path):
+    """Verifier: the documented DEMO replay latched the kill switch at tick 2 because PUMPUSDT's
+    data starts weeks later (no quote = stale for the guardian, nothing held, and nothing ever
+    released it), so the demo profile produced no signal at all. A universe-only symbol without a
+    quote is the bot's concern only: no kill switch, and the other symbol trades (demo profile)."""
+    from wallexbot.bot.feed import BAR_S
+    data = tmp_path / "history"
+    write_candles_csv(data / SYM / f"{SYM}_1m_2023-11.csv", explode_bars(series(WINNER)))
+    # the replay clock starts after the 120-bar warm-up (bar 121); LATEUSDT lists at bar 130
+    late = [dataclasses.replace(b, ts=b.ts + 130 * BAR_S) for b in series(())]
+    write_candles_csv(data / "LATEUSDT" / "LATEUSDT_1m_2023-11.csv", explode_bars(late))
+    db = tmp_path / "late.db"
+    out = bot_main.run_replay(db, data, cheap_config(), balances={"USDT": D("1000")}, profile="demo", max_ticks=400)
+    assert out["kill_switch_engaged"] is False and out["guardian"]["failed"] == 0
+    s = Store(db)
+    try:
+        assert not s.rows("killswitch_events")
+        buys = [r for r in s.intents_in_states(frozenset(IntentState)) if r.intent.side is Side.BUY]
+        assert SYM in {r.intent.symbol for r in buys} and out["fills"] > 0
+        assert all(r.created_at > late[0].ts for r in buys if r.intent.symbol == "LATEUSDT")   # once listed
+        assert out["signals"] >= 1
+        assert not [e for e in s.rows("errors") if e["source"].startswith("guardian.")]
+    finally:
+        s.close()
