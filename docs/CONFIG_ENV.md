@@ -12,7 +12,7 @@ Names only. Values never go in the repo. Local values belong in a git-ignored `.
 | `WALLEX_API_KEY_TRADE` | Read + Trade Wallex key | **Read** by `assert_live_armed()` in `exchange/auth.py`, which `load_config()` calls when `mode: live`. Presence and header-safe format are checked. `WallexBroker` (unverified) refuses to send or cancel unless built with this key and the token returned by `assert_live_armed()`; nothing builds one yet. |
 | `WALLEX_SUB_ACCOUNT_CLIENT_ID` | Sub-account identifier | Named in `exchange/auth.py` (`SUB_ACCOUNT_ENV`); optionally passed to the private client as a header. Not read by any loop yet. Use not specified in the plan. |
 | `WALLEX_ARM_LIVE` | Live arming | **Enforced** by `config.py` and `assert_live_armed()`: must equal `YES_I_UNDERSTAND` (exact match) when `mode: live`. |
-| `ANTHROPIC_API_KEY` | Optional AI advisor | Not read by any code yet. The advisor is off in the critical path by default. |
+| `ANTHROPIC_API_KEY` | Optional AI advisor | Read only by `bot --advisor shadow` (`advisor_bridge.py`, via `redact.load_secret`); without it the bot warns and runs with `NullAdvisor`. Shadow verdicts are logged, never applied. |
 
 ## Config keys
 

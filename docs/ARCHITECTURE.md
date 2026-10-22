@@ -12,7 +12,8 @@ Implemented modules (under `src/wallexbot/`):
 - `ai/`: `schema` (strict context and verdict types), `advisor` (`NullAdvisor`, `AnthropicAdvisor`, `LoggedAdvisor`, `make_advisor`), `evaluate`. Imports nothing from the order path. `advisor_bridge.py` (top level) adapts the bot's dict context to it and persists verdicts as `audit_events` (actor `advisor`).
 - `exchange/shadow.py`: `ShadowBroker`, a Broker that answers from memory using public depth snapshots; `step()` matches resting orders; optional JSONL journal.
 - `cli.py`, `__main__.py`: `demo`, `backtest`, `doctor`, `guardian`, `bot`.
-- `guardian/`: `monitor`, `flatten`, `main` (demo CLI, mock/shadow only).
+- `guardian/`: `monitor`, `flatten`, `main` (`InProcessGuardian`, run by the bot; standalone demo CLI on its own mock broker).
+- Shared helpers: `dust.py` (one dust rule for risk, bot and guardian), `clockstep.py` (timers that re-anchor after a backward clock step), `strategy/profiles.py` (`strict` and the `demo` EXERCISE profile).
 - `risk/` (`engine`, `killswitch`), `oms.py`, `store.py` (incl. `audit_events` table and heartbeat), `pipeline.py` (scripted mock round trip, `build_mock_broker`), `doctor.py` (read-only preflight, `wallexbot doctor`), `config.py`, `types.py`, `redact.py`.
 
 **Not implemented**: any live broker wiring (the CLI and the bot refuse live). The diagram marks the live broker as *planned*.
@@ -54,13 +55,14 @@ Implemented modules (under `src/wallexbot/`):
                                                  ^
                                                  | reads / writes
                        +-------------------------+-----------------+
-                       | guardian/ (separate process, implemented)  |
+                       | guardian/ (in the bot process, own Store  |
+                       |  connection, same broker object)          |
                        |  watches P&L, drawdown, daily loss;       |
                        |  engages kill switch, flattens on hard    |
                        |  breach                                   |
                        +-------------------------------------------+
 
-   bot/main.py (via cli.py `bot`) wires the modules together; the guardian is a separate process.
+   bot/main.py (via cli.py `bot`) wires the modules together and ticks the guardian after each bot tick.
    backtest/ replays the strategy engines and exit policies on stored candles (it has its own
    simulated fills and a RiskConfig-based loss check, not the OMS).
 ```
@@ -79,14 +81,15 @@ Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, i
 - Every order, including reduce-only exits and guardian flattens, goes through the OMS state machine.
 - Intent ids are deterministic: uuid5 over a JSON array of signal, symbol, side, type, quantity, price, stop price and reduce-only flag. Numbers are keyed by value, not spelling (`0.01` and `0.010000` give the same id), so resubmitting the same intent, at any decimal scale, produces the same client id (`wb_` + 32 hex) and at most one broker order. Two exits that differ only in stop price are different intents.
 - After a POST timeout the intent moves to `unknown_pending`. It is **never resubmitted**. It is reconciled by looking up the client id and open orders.
+- In `OMS.submit` the risk view, the `risk_decisions` row and `proposed -> risk_approved | rejected` are one `BEGIN IMMEDIATE` transaction; a SELL still `proposed` and younger than 30 s counts as committed. Bot exits and guardian flattens therefore never both sell one position (`tests/test_exit_race.py`; RISK.md).
 
-## Guardian as a separate process
+## Guardian (in-process in this build)
 
-- The guardian (`guardian/`) is written to run as its own process with its own `Store` connection; it reads the exchange as the source of truth. No production launcher exists yet (only the mock/shadow demo `python -m wallexbot.guardian.main`).
-- It watches daily loss, drawdown, balance-vs-ledger mismatch, data staleness and the strategy heartbeat (RISK.md has the thresholds).
+- `bot --mode mock|shadow` runs `InProcessGuardian` (`guardian/main.py`): its own `Store` connection on the bot's database, its own kill switch, risk engine and OMS, and the bot's broker **object** as the source of truth. It ticks after every bot tick and at least every `--guardian-interval-s` (15 s) while the bot sleeps; a failed guardian tick never stops the bot. `--no-guardian` disables it.
+- It watches daily loss, drawdown, broker-vs-ledger mismatch, data staleness and the strategy heartbeat (RISK.md has the thresholds), for the bot's universe plus every held symbol.
 - On a soft breach or health fault it engages the kill switch; on a hard breach it flattens open positions through `OMS.submit`. It never clears the kill switch.
 - It must not import `strategy`, `backtest` or `ai` (`tests/test_guardian_isolation.py`).
-- Separation means a crash or hang in the trading loop does not disable the guardian.
+- Trade-off: in-process means a hang of the bot process also stops the guardian. A separate process would only help against a real exchange account (live), which this build does not have; a separate process cannot see an in-process paper or shadow broker. The standalone `wallexbot guardian` is therefore a demo on its own mock broker, and refuses a bot's database.
 
 ## AI boundary
 

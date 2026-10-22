@@ -1,6 +1,6 @@
 # Deploying wallexbot (shadow mode, single host)
 
-Status: **shadow only.** The bot reads public order books from `api.wallex.ir` (GET only) and simulates fills (`ShadowBroker`); no order is ever sent and no key is needed. Live trading does not exist in this build. This page was checked by building the image (with a local base image) and running the demo, guardian and healthcheck inside it, offline, read-only and as a non-root user; it was **not** run for a day against the real API and the systemd units were not started on a live systemd.
+Status: **shadow only.** The bot reads public order books from `api.wallex.ir` (GET only) and simulates fills (`ShadowBroker`); no order is ever sent and no key is needed. Live trading does not exist in this build. An earlier revision of this page was checked by building the image (with a local base image) and running the demo, guardian and healthcheck inside it, offline, read-only and as a non-root user. The in-process guardian of this revision was checked with the test suite only (no image rebuild). Nothing was run for a day against the real API and the systemd units were not started on a live systemd.
 
 ## Prerequisites
 
@@ -12,7 +12,7 @@ Status: **shadow only.** The bot reads public order books from `api.wallex.ir` (
 
 ```bash
 git clone <repo> && cd Wallex
-docker compose up -d --build          # the shadow bot; add --profile recorder for market-data recording
+docker compose up -d --build          # the shadow bot (guardian in-process); add --profile recorder for recording
 docker compose ps                     # STATUS shows (healthy) after ~2 min
 docker compose logs -f bot
 ```
@@ -35,17 +35,19 @@ The checkout is root-owned and read-only to the service; the service user can wr
 
 ## Guardian: read this first
 
-`python -m wallexbot guardian` is a **demo loop** in this build: it watches its own in-memory mock broker (10000 USDT), not the bot's shadow broker, and writes equity high-water marks into the shared database. Against a bot started with `--balance 1000` that looks like a 90% drawdown, so the bot's risk engine blocks its entries (checked with a scratch DB). A bot position would also trigger a balance mismatch and an automatic kill switch. For that reason the guardian is **opt-in** (`docker compose --profile guardian up -d`; `wallexbot-guardian.service` is shipped but not to be enabled) until it can read the shadow broker. If you run it anyway: exactly one per database, start the bot first (no strategy heartbeat for 60 s engages the kill switch), and expect to inspect `errors` and `killswitch_events`.
+The guardian runs **inside the bot process** (`bot --mode shadow`, on by default): its own SQLite connection on `bot.db`, the bot's own `ShadowBroker` object, a tick after every bot tick and at least every `--guardian-interval-s` (15 s). It writes a `guardian` heartbeat, engages the kill switch on soft breaches, stale data, a lost strategy heartbeat or a balance mismatch, and flattens through the OMS on a hard breach. In shadow mode this **exercises the guardian logic against simulated fills**; it protects no real money. `--no-guardian` disables it (the healthcheck then stops requiring its heartbeat).
+
+There is no separate guardian service any more (no compose service, no systemd unit). A separate guardian process only makes sense against a live exchange account, which this build does not have: a separate process cannot see the bot's in-process paper or shadow broker. `python -m wallexbot guardian` is a standalone DEMO on its own in-memory mock broker (10000 USDT). It refuses to run without `--demo-db`, and refuses any database that holds bot events or equity rows it did not write, because its equity rows would corrupt the bot's drawdown and balance checks.
 
 ## What to monitor
 
-- Health: `docker compose exec bot python /app/deploy/healthcheck.py --db /data/bot.db` (or `make healthcheck DB=...`). One JSON line; exit 0 only if the strategy heartbeat is younger than `--max-heartbeat-age-s` (120) and no `guardian.*` error, `needs_review` audit event or `needs_review` intent is newer than `--alert-window-min` (15). An engaged kill switch is reported as a warning; add `--fail-on-killswitch` to make it fail. It opens the DB read-only. Docker runs it as the container HEALTHCHECK.
+- Health: `docker compose exec bot python /app/deploy/healthcheck.py --db /data/bot.db` (or `make healthcheck DB=...`). One JSON line; exit 0 only if the strategy heartbeat (and, when the run enabled the guardian, the guardian heartbeat) is younger than `--max-heartbeat-age-s` (120) and no `guardian.*` error, `needs_review` audit event or `needs_review` intent is newer than `--alert-window-min` (15). It also reports the run's `mode` and strategy `profile`; `profile: demo` (`exercise_profile: true`) adds a warning. An engaged kill switch is reported as a warning; add `--fail-on-killswitch` to make it fail. It opens the DB read-only. Docker runs it as the container HEALTHCHECK.
 - Shadow journal: `/data/shadow_journal.jsonl` (simulated fills; appears once an order exists). No file after hours means no signals, which is a valid outcome.
 - Store tables (read-only): `sqlite3 -readonly bot.db`. Look at `order_intents`, `fills`, `positions_snapshots`, `killswitch_events`, `errors`, `audit_events`.
 
 ## Stop safely
 
-- `docker compose stop` / `systemctl stop wallexbot-bot` sends SIGTERM; the bot finishes its current tick and exits (grace 60 s). Stop the guardian (if any) with it.
+- `docker compose stop` / `systemctl stop wallexbot-bot` sends SIGTERM; the bot finishes its current tick and exits (grace 60 s). The in-process guardian stops with it.
 - Kill switch: engaging it blocks new entries and never blocks exits. The CLI has no command for it; it is the latest row of `killswitch_events` (`KillSwitch.engage` / `.disengage` in `risk/killswitch.py`), and the guardian engages it automatically. Check `killswitch_engaged` in the healthcheck before assuming the bot is trading.
 
 ## Back up the database
@@ -68,7 +70,8 @@ Use the online backup, never `cp` of `bot.db` alone (WAL files hold recent rows)
 ## Do not
 
 - Do not mount or set Wallex keys. Shadow needs none; never put `WALLEX_API_KEY_TRADE` or `WALLEX_ARM_LIVE` in `.env` or `/etc/wallexbot/env`.
-- Do not run two guardians on one database, and do not run two bots on one database.
+- Do not run two bots on one database, and do not point the standalone guardian demo at a bot's database (it refuses).
+- Do not deploy `--profile demo`: it is an exercise profile for watching the pipeline, with no claimed edge.
 - Do not start a bot against a database written by another version without reading the changelog and backing it up first: the schema is created, not migrated.
 - Do not publish ports, put the volume on network storage or edit `bot.db` by hand (triggers make the audit tables append-only).
 - Do not read shadow results as evidence: the fill model is an unvalidated assumption set.

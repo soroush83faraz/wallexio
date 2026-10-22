@@ -47,6 +47,12 @@ The hard stop (the signal's stop) applies to all. `on_bar` runs on each closed b
 
 Exit orders are reduce-only; the kill switch does not block them (RISK.md).
 
+## Profiles (`strategy/profiles.py`, `bot --profile strict|demo`)
+
+- `strict` (default): `MomentumParams()` as above. Under the default 0.35 % taker fee and recorded costs the cost gate is practically unreachable (`reports/v2_summary.md`), so a strict mock/shadow run usually shows abstentions only.
+- `demo`: an **EXERCISE profile, no edge claimed, mock/shadow only**. It exists to make decisions, risk checks, orders, fills, exits and guardian ticks visible. Changes against strict: `cost_mult`/`cost_mult_tight` 0.5/0.5, `volume_mult`/`_tight` 1.2/1.5, `atr_pct_min` 0.0005, `roc_z_min` 0.5, `er_min` 0.2, `min_score` 0.5; nothing else. The values were picked by hand so that signals occur, not selected on any validation data. The bot prints `EXERCISE PROFILE - NO EDGE CLAIMED - SHADOW/PAPER ONLY`, writes `profile` into every bot audit event and the startup run record (the healthcheck reports it), and refuses `demo` for any mode but mock/shadow and for a config with `mode: live`.
+- Observed: on the synthetic breakout replay with default fees, strict places no order and demo completes a full entry/exit lifecycle (`tests/test_profiles.py`). On one local replay of recorded October 2026 1m data (BTC/ETH/SOL/XRP, first 4000 simulated minutes, default config, 1000 USDT), strict produced 0 signals and demo 2 signals and 2 round trips, both closed at a loss. That run is not part of the test suite and says nothing about edge.
+
 ## What the strategy does not claim
 
 - No profitability, win rate or expected return. No backtest has been run.

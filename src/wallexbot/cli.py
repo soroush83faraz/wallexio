@@ -6,9 +6,11 @@
                `--final-test --params-file frozen.json` is the single-use test-set evaluation
     calibrate-costs  spread/slippage calibration from recorded order books -> reports/cost_calibration.json
     doctor     read-only account preflight; needs WALLEX_API_KEY_READ in the environment (exit 2 without it)
-    guardian   guardian demo loop, mock/shadow only
+    guardian   standalone guardian DEMO on its own mock broker and a NEW database (--demo-db); it refuses a
+               bot's database (the bot runs its guardian in-process)
     bot        autonomous loop, mock (paper; offline with --replay-from) or shadow (live public book, simulated
-               fills); optional `--advisor off|shadow` (shadow = log-only AI verdicts, never applied)
+               fills), in-process guardian (--no-guardian to disable), `--profile strict|demo` (demo = EXERCISE
+               profile, no edge claimed); optional `--advisor off|shadow` (shadow = log-only AI verdicts)
 
 There is no live mode in this build: `--arm-live` is refused on every command.
 """
@@ -192,11 +194,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.set_defaults(func=_doctor)
 
     sub.add_parser("guardian", add_help=False,
-                   help="guardian demo loop (mock/shadow only); all further arguments go to "
-                        "`python -m wallexbot.guardian.main` (--db PATH --mode mock|shadow [--ticks N] ...)")
+                   help="standalone guardian DEMO (own mock broker, new DB only); all further arguments go to "
+                        "`python -m wallexbot.guardian.main` (--db NEW.db --mode mock|shadow --demo-db [--ticks N])")
     sub.add_parser("bot", add_help=False,
                    help="autonomous loop, mock|shadow only (--db PATH --mode mock|shadow [--replay-from DIR] "
-                        "[--max-ticks N] [--balance USDT] [--advisor off|shadow]); live is refused")
+                        "[--max-ticks N] [--balance USDT] [--profile strict|demo] [--no-guardian] "
+                        "[--advisor off|shadow]); live is refused")
     return p
 
 
