@@ -181,3 +181,34 @@ def test_orphan_position_gets_conservative_stop_or_review(tmp_path, with_bars):
     rig.tick()
     assert [r.intent.reduce_only for r in rig.intents(Side.SELL)] == [True]
     rig.close()
+
+
+@pytest.mark.parametrize("gap, resumed", [(15, True), (60, False)])
+def test_entry_left_proposed_by_a_store_error_is_resumed_or_dropped_next_poll(tmp_path, gap, resumed):
+    """OMS.submit raised (database is locked) after the entry intent was appended: the next poll
+    resumes the SAME intent while it is younger than entry_ioc_s (20 s), else rejects it (it was
+    never sent); either way the symbol is not blocked forever and nothing is sent twice."""
+    import sqlite3
+    rig = Rig(tmp_path)
+    real, fired = rig.oms.submit, []
+
+    def flaky(intent, *a, **k):
+        if intent.side is Side.BUY and not fired:
+            fired.append(intent.client_id)
+            rig.store.append_intent(intent, ts=rig.clock())
+            raise sqlite3.OperationalError("database is locked")
+        return real(intent, *a, **k)
+    rig.oms.submit = flaky
+    while not fired:
+        rig.tick()
+        rig.clock.advance(60)
+    rig.clock.advance(gap - 60)
+    rep = rig.tick()
+    (cid,) = fired
+    state, S = rig.store.get_intent(cid).state, IntentState
+    if resumed:
+        assert f"entry_resumed:{SYM}:filled" in rep.actions and state is S.FILLED
+        assert sum(o.client_id == cid for o in rig.broker.orders.values()) == 1
+    else:
+        assert f"settled:{SYM}:rejected" in rep.actions and state is S.REJECTED
+        assert all(o.client_id != cid for o in rig.broker.orders.values())
