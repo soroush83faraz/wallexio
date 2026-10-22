@@ -4,9 +4,27 @@ Entries (BUY, not reduce-only) run every check below, in order, and are approved
 fails. Reduce-only SELLs (exits) skip entry limits, the kill switch and loss breaches; they still
 need known symbol rules, exact precision, and must not sell more than is held and uncommitted.
 Any exception inside check() => rejected. The trading day is the UTC calendar day (24/7 market).
+
+Clock / timestamp handling (fail closed; a backward clock step or bad data must never make old
+data look fresh):
+- Entry quotes: `quote.ts` must be finite and at most `max_future_skew_s` after `now`
+  (`quote_future_ts` otherwise), and at most `config.max_data_age_s` before it (`quote_stale`
+  otherwise; the boundary age itself is accepted). A quote inside the future skew is as fresh as
+  of `now` (age clamped to 0), matching guardian/monitor.py. Prices must be finite and > 0
+  (`quote_bad_price`), not crossed (bid > ask: `quote_crossed`) and the spread must be below
+  `max_sane_spread_bps` (`quote_absurd_spread`; the configured `max_spread_bps` policy check
+  `spread_too_wide` still applies on top).
+- Loss cooldown: a `last_loss_ts` after `now` (clock stepped back, or bad data) is replaced by the
+  earliest `now` at which this engine saw it, so the cooldown still runs a full `cooldown_s` but
+  always expires; it can neither go negative nor last until the clock catches up with a bogus ts.
+  A non-finite `last_loss_ts` keeps the cooldown engaged (unknown => fail closed).
+- SOD day: `sod_day` must equal the UTC day of `now`; a clock stepped back across midnight
+  therefore rejects entries (`sod_equity_stale`) until the account snapshot is rebuilt.
+Reduce-only exits never look at the quote or the clock.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -54,12 +72,23 @@ class _Stop(Exception):
 
 class RiskEngine:
     def __init__(self, config: Config, rules: Mapping[str, SymbolRules], killswitch,
-                 *, cooldown_s: float = 3600.0, max_future_skew_s: float = 5.0) -> None:
+                 *, cooldown_s: float = 3600.0, max_future_skew_s: float = 5.0,
+                 max_sane_spread_bps: Decimal | int | str = 2000) -> None:
+        if not (math.isfinite(cooldown_s) and cooldown_s >= 0):
+            raise ValueError("cooldown_s must be finite and >= 0")
+        if not (math.isfinite(max_future_skew_s) and max_future_skew_s >= 0):
+            raise ValueError("max_future_skew_s must be finite and >= 0")
+        sane = Decimal(str(max_sane_spread_bps))
+        if not (sane.is_finite() and sane > 0):
+            raise ValueError("max_sane_spread_bps must be finite and > 0")
         self.config = config
         self.rules = dict(rules)
         self.killswitch = killswitch
         self.cooldown_s = cooldown_s
         self.max_future_skew_s = max_future_skew_s
+        self.max_sane_spread_bps = sane
+        # (future last_loss_ts value, earliest `now` it was seen at): see _cooldown
+        self._future_loss: tuple[float, float] | None = None
 
     # ------------------------------------------------------------------ public
     def check(self, intent: OrderIntent, quote: Quote | None, account: AccountState,
@@ -164,17 +193,35 @@ class RiskEngine:
 
     # ------------------------------------------------------------------ helpers
     def _quote_problem(self, intent: OrderIntent, quote: Quote | None, now: float) -> str | None:
+        """Entry-quote validity. Every comparison is written so NaN fails closed."""
         if quote is None:
             return "no_quote"
         if quote.symbol != intent.symbol:
             return "quote_symbol_mismatch"
-        if quote.bid <= 0 or quote.ask < quote.bid:
-            return "bad_quote"
-        age = now - quote.ts
-        if age > self.config.max_data_age_s:
-            return "stale_quote"
-        if age < -self.max_future_skew_s:
-            return "quote_from_future"
+        now = float(now)
+        if not math.isfinite(now):
+            return "bad_clock"
+        try:
+            ts = float(quote.ts)
+        except (TypeError, ValueError):
+            return "quote_bad_ts"
+        if not math.isfinite(ts):
+            return "quote_bad_ts"
+        if not ts <= now + self.max_future_skew_s:
+            return "quote_future_ts"
+        age = max(0.0, now - ts)   # inside the skew: fresh as of now
+        if not age <= self.config.max_data_age_s:
+            return "quote_stale"
+        try:
+            bid, ask = Decimal(str(quote.bid)), Decimal(str(quote.ask))
+        except Exception:
+            return "quote_bad_price"
+        if not (bid.is_finite() and ask.is_finite() and bid > 0 and ask > 0):
+            return "quote_bad_price"
+        if bid > ask:
+            return "quote_crossed"
+        if not (ask - bid) / ((bid + ask) / 2) * _BPS <= self.max_sane_spread_bps:
+            return "quote_absurd_spread"
         return None
 
     @staticmethod
@@ -240,7 +287,27 @@ class RiskEngine:
         return None
 
     def _cooldown(self, account: AccountState, now: float) -> str | None:
-        if account.consecutive_losses >= self.config.risk.consecutive_loss_cooldown:
-            if account.last_loss_ts is None or now - account.last_loss_ts < self.cooldown_s:
-                return "loss_cooldown"
+        """Cooldown after N consecutive losses, `cooldown_s` from the latest loss.
+
+        A last_loss_ts after `now` (backward clock step / bad data) is clamped to the earliest `now`
+        this engine has seen it at: the loss cannot have happened after it was first observed, so the
+        full cooldown still runs from then, but it always expires (no negative elapsed time, no
+        waiting for the clock to reach a bogus future ts). Unknown/non-finite ts: stay in cooldown."""
+        if account.consecutive_losses < self.config.risk.consecutive_loss_cooldown:
+            return None
+        if account.last_loss_ts is None:
+            return "loss_cooldown"
+        now = float(now)
+        ts = float(account.last_loss_ts)
+        if not (math.isfinite(ts) and math.isfinite(now)):
+            return "loss_cooldown"
+        if ts > now:
+            prev = self._future_loss
+            seen = min(prev[1], now) if prev is not None and prev[0] == ts else now
+            self._future_loss = (ts, seen)
+            ts = seen
+        elif self._future_loss is not None and self._future_loss[0] == ts:
+            ts = min(ts, self._future_loss[1])   # clock caught up: keep the earlier start
+        if not now - ts >= self.cooldown_s:
+            return "loss_cooldown"
         return None
