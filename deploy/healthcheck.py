@@ -21,6 +21,13 @@ Checks (table and column names come from wallexbot/store.py):
     kind='tick', current run) lists in "held_stale" every held / ordered symbol with no fresh
     quote for > 120 s. Any => unhealthy, whatever the stale action (hold keeps the position). The
     guardian also re-emits a guardian.alert row every 5 min while it lasts (next check).
+  * market data down: the bot's latest 'feed_down' / 'feed_restored' event (actor='bot', current
+    run). While the feed is down the bot is alive but degraded (no new entries, heartbeat still
+    written, no kill switch): "feed_down_since" / "feed_outage_s" are reported and the probe gives
+    a WARNING (still ok) for outages up to --max-feed-outage-s (default 900), so an orchestrator
+    does not restart a healthy bot during a short exchange outage, and FAILS beyond that. The
+    duration is the larger of (now - outage start) and the bot's own count in its latest
+    bot.feed_down errors row (written every 5 min; immune to a backward clock step).
   * alerts in the last --alert-window-min minutes (default 15), any of: errors rows whose source
     starts with 'guardian.' (guardian.needs_review, guardian.monitor, guardian.loop, ...),
     audit_events kind 'needs_review', order_intents in state 'needs_review'. Any => unhealthy.
@@ -51,7 +58,7 @@ def _open_ro(db: str) -> sqlite3.Connection:
 
 
 def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_min: float,
-             allow_killswitch: bool = False) -> dict:
+             allow_killswitch: bool = False, max_feed_outage_s: float = 900.0) -> dict:
     problems: list[str] = []
     warnings: list[str] = []
     out: dict = {}
@@ -105,6 +112,13 @@ def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_mi
                 problems.append(f"guardian: held/ordered {','.join(map(str, out['held_stale']))} without a fresh "
                                 f"quote (stale_action={held.get('stale_action')}) as of its latest tick")
 
+        feed = _feed_outage(conn, now)
+        out["feed_down_since"], out["feed_outage_s"] = feed.get("since"), feed.get("outage_s")
+        if feed:
+            msg = (f"market data down for {feed['outage_s']:.0f}s (bot alive, no new entries; "
+                   f"limit {max_feed_outage_s:.0f}s)")
+            (problems if feed["outage_s"] > max_feed_outage_s else warnings).append(msg)
+
         since = now - alert_window_min * 60.0
         n_err = conn.execute("SELECT COUNT(*) FROM errors WHERE ts>=? AND source LIKE 'guardian.%'",
                              (since,)).fetchone()[0]
@@ -123,6 +137,37 @@ def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_mi
         conn.close()
     out["problems"], out["warnings"] = problems, warnings
     return out
+
+
+def _feed_outage(conn: sqlite3.Connection, now: float) -> dict:
+    """{"since": ts, "outage_s": s} while the bot's latest feed event of the current run is
+    'feed_down', else {}."""
+    start = conn.execute("SELECT MAX(id) FROM audit_events WHERE actor='bot' AND kind='startup'").fetchone()[0]
+    row = conn.execute("SELECT kind, ts, payload FROM audit_events WHERE actor='bot' AND kind IN "
+                       "('feed_down', 'feed_restored') AND id>? ORDER BY id DESC LIMIT 1", (start or 0,)).fetchone()
+    if row is None or row[0] != "feed_down":
+        return {}
+    try:
+        since = float(_loads(row[2]).get("since", row[1]))
+    except (TypeError, ValueError):
+        since = float(row[1])
+    outage = max(0.0, now - since)
+    last = conn.execute("SELECT payload FROM errors WHERE source='bot.feed_down' ORDER BY id DESC LIMIT 1").fetchone()
+    p = _loads(last[0]) if last is not None else {}
+    try:
+        if float(p.get("since")) == since:          # the same outage
+            outage = max(outage, float(p.get("outage_s")))
+    except (TypeError, ValueError):
+        pass
+    return {"since": since, "outage_s": round(outage, 1)}
+
+
+def _loads(text) -> dict:
+    try:
+        p = json.loads(text)
+    except (TypeError, ValueError):
+        return {}
+    return p if isinstance(p, dict) else {}
 
 
 def _held_stale(conn: sqlite3.Connection) -> dict:
@@ -172,7 +217,8 @@ def run(args: argparse.Namespace, now: float | None = None) -> tuple[int, dict]:
         if args.db:
             parts.append(check_db(args.db, now=now, max_heartbeat_age_s=args.max_heartbeat_age_s,
                                   alert_window_min=args.alert_window_min,
-                                  allow_killswitch=bool(getattr(args, "allow_killswitch", False))))
+                                  allow_killswitch=bool(getattr(args, "allow_killswitch", False)),
+                                  max_feed_outage_s=float(getattr(args, "max_feed_outage_s", 900.0))))
         if args.recorder_dir:
             parts.append(check_recorder(args.recorder_dir, now=now, max_age_s=args.max_recorder_age_s))
     except (sqlite3.Error, OSError) as e:
@@ -195,6 +241,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="report an engaged kill switch as a warning instead of failing (default: exit 1)")
     p.add_argument("--fail-on-killswitch", action="store_true",
                    help="compatibility no-op: an engaged kill switch fails by default")
+    p.add_argument("--max-feed-outage-s", type=float, default=900.0,
+                   help="market data down (bot alive, degraded) longer than this fails; shorter warns (900)")
     p.add_argument("--recorder-dir", help="also require fresh *.jsonl output in this directory")
     p.add_argument("--max-recorder-age-s", type=float, default=300.0)
     args = p.parse_args(argv)
