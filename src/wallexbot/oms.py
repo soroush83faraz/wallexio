@@ -10,6 +10,16 @@ Invariants:
   order never double-counts. Fill rows, position snapshot and state change commit atomically.
 - Positions are long-only; fees in the base asset reduce quantity, any fee is valued in the quote
   currency; the exact cost basis (fees included) drives realized P&L, which is net of fees.
+- Risk decision and state change are ONE store transaction (BEGIN IMMEDIATE): the open-order view
+  the risk engine sees, the risk_decisions row and PROPOSED -> RISK_APPROVED | REJECTED commit
+  together, so no other connection (the guardian) can observe a decided-but-PROPOSED intent, and
+  two actors' checks are serialised by SQLite's write lock.
+- Committed SELLs (what an exit may not oversell) = open intents (OPEN_INTENT_STATES) plus every
+  SELL intent still PROPOSED and younger than PROPOSED_COMMIT_WINDOW_S (an actor is between
+  append_intent and its risk transaction). A PROPOSED older than that is a crash leftover: it is
+  ignored here and recover() settles it. A PROPOSED dated in the future (clock stepped back) counts
+  as young: fail closed. For a given intent only PROPOSED SELLs inserted BEFORE it count (store
+  insertion order), so of two racing exits the earlier one wins and they never block each other.
 """
 from __future__ import annotations
 
@@ -21,13 +31,19 @@ from typing import Callable
 
 from wallexbot.exchange.base import BrokerOrder, OrderRejected, OrderStatus, RateLimited
 from wallexbot.risk.engine import AccountState, RiskDecision
-from wallexbot.store import Store
+from wallexbot.store import IntentRecord, Store
 from wallexbot.types import TERMINAL_STATES, Fill, IntentState, OrderIntent, Position, Quote, Side
 
 S = IntentState
 OPEN_INTENT_STATES = frozenset({S.RISK_APPROVED, S.SUBMITTED, S.PARTIALLY_FILLED, S.UNKNOWN_PENDING})
 _RECONCILE_STATES = frozenset({S.SUBMITTED, S.PARTIALLY_FILLED, S.UNKNOWN_PENDING})
+PROPOSED_COMMIT_WINDOW_S = 30.0
 _ZERO = Decimal(0)
+
+
+def is_young_proposed(rec: IntentRecord, now: float, window_s: float = PROPOSED_COMMIT_WINDOW_S) -> bool:
+    """PROPOSED and created less than `window_s` before `now` (or after it: clock stepped back)."""
+    return rec.state is S.PROPOSED and not now - rec.created_at >= window_s
 
 
 class LedgerError(Exception):
@@ -142,6 +158,16 @@ class OMS:
         """Intents that may hold a live exchange order (ambiguous ones included)."""
         return [r.intent for r in self.store.intents_in_states(OPEN_INTENT_STATES)]
 
+    def committed_intents(self, now: float, before_seq: int | None = None) -> list[OrderIntent]:
+        """open_intents() plus SELLs still PROPOSED and younger than PROPOSED_COMMIT_WINDOW_S
+        (inserted before `before_seq` when given): every order that may still reach the exchange."""
+        out = self.open_intents()
+        for r in self.store.intents_in_states({S.PROPOSED}):
+            if r.intent.side is Side.SELL and is_young_proposed(r, now) and \
+                    (before_seq is None or r.seq < before_seq):
+                out.append(r.intent)
+        return out
+
     # ------------------------------------------------------------------ submit
     def submit(self, intent: OrderIntent, quote: Quote | None, account: AccountState,
                now: float | None = None) -> SubmitResult:
@@ -154,20 +180,25 @@ class OMS:
                 self._cas(cid, S.RISK_APPROVED, S.UNKNOWN_PENDING, "resubmit_seen_risk_approved", now)
             return SubmitResult(cid, self._state(cid), sent=False)
 
-        try:
-            decision = self.risk.check(intent, quote, account, self.positions(), self.open_intents(), now)
-        except Exception as e:
-            decision = RiskDecision(False, (f"risk_error:{type(e).__name__}",))
-        self.store.append_risk_decision(cid, decision, ts=now)
-        try:
-            approved = self.approve(decision) is True
-        except Exception:
-            approved = False
-        if not approved:
-            self._cas(cid, S.PROPOSED, S.REJECTED, "risk:" + ",".join(decision.reasons), now)
-            return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
-        if not self._cas(cid, S.PROPOSED, S.RISK_APPROVED, "risk_approved", now):
-            return SubmitResult(cid, self._state(cid), sent=False, decision=decision)  # lost a race
+        with self.store.tx():   # risk view + decision + transition: one atomic step (see module doc)
+            rec = self.store.get_intent(cid)
+            if rec.state is not S.PROPOSED:   # settled by someone else (recover) meanwhile
+                return SubmitResult(cid, rec.state, sent=False)
+            try:
+                decision = self.risk.check(intent, quote, account, self.positions(),
+                                           self.committed_intents(now, before_seq=rec.seq), now)
+            except Exception as e:
+                decision = RiskDecision(False, (f"risk_error:{type(e).__name__}",))
+            self.store.append_risk_decision(cid, decision, ts=now)
+            try:
+                approved = self.approve(decision) is True
+            except Exception:
+                approved = False
+            if not approved:
+                self._cas(cid, S.PROPOSED, S.REJECTED, "risk:" + ",".join(decision.reasons), now)
+                return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
+            if not self._cas(cid, S.PROPOSED, S.RISK_APPROVED, "risk_approved", now):
+                return SubmitResult(cid, self._state(cid), sent=False, decision=decision)  # lost a race
         if not self._ks_allows(intent):  # last-moment gate
             self._cas(cid, S.RISK_APPROVED, S.REJECTED, "kill_switch", now)
             return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
