@@ -71,7 +71,7 @@ Run it (all offline except `bot --mode shadow`, which makes public GET requests 
 
 ## Safety defaults
 
-- `mode: mock` in `config/default.yaml`. Live mode is rejected unless `WALLEX_ARM_LIVE=YES_I_UNDERSTAND`, a `WALLEX_API_KEY_TRADE` and `cli_armed=True` in code are all present. The CLI refuses `--arm-live` and never passes `cli_armed`, so no command can reach live.
+- `mode: mock` in `src/wallexbot/default_config.yaml`. Live mode is rejected unless `WALLEX_ARM_LIVE=YES_I_UNDERSTAND`, a `WALLEX_API_KEY_TRADE` and `cli_armed=True` in code are all present. The CLI refuses `--arm-live` and never passes `cli_armed`, so no command can reach live.
 - Host allow-list: only `api.wallex.ir`.
 - Secrets live in a local `.env` (git-ignored). Only variable names are committed, in `.env.example`.
 - Wallex keys, when used, are read-only where possible. No key may hold withdrawal rights.

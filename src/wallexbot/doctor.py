@@ -33,7 +33,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from wallexbot.config import ALLOWED_HOSTS, DEFAULT_PATH, load_config
+from wallexbot.config import ALLOWED_HOSTS, load_config
 from wallexbot.exchange.auth import API_HOST, AuthError, assert_host_allowed
 from wallexbot.exchange.wallex_private import (BALANCES_PATH, BASE_URL, AuthRejected, Transport,
                                                WallexAccountReader, urllib_transport)
@@ -105,7 +105,7 @@ def _get_only(transport: Transport) -> Transport:
 
 def run_doctor(read_key: Secret | None, transport: Transport | None = None, *,
                sub_account: str | Secret | None = None, clock: Callable[[], float] = time.time,
-               sleep: Callable[[float], None] = time.sleep, config_path: Path | str = DEFAULT_PATH,
+               sleep: Callable[[float], None] = time.sleep, config_path: Path | str | None = None,
                env: Mapping[str, str] | None = None, repo_root: Path = REPO_ROOT,
                git: GitRunner | None = None, max_skew_s: float = 5.0,
                timeout_s: float = 10.0) -> DoctorReport:
@@ -210,7 +210,7 @@ def _clock_skew(reader: WallexAccountReader, max_skew_s: float) -> CheckResult:
     return CheckResult("clock_skew", PASS if abs(skew) <= max_skew_s else FAIL, detail)
 
 
-def _check_config(path: Path | str, env: Mapping[str, str] | None) -> CheckResult:
+def _check_config(path: Path | str | None, env: Mapping[str, str] | None) -> CheckResult:
     try:
         cfg = load_config(path, env=os.environ if env is None else env, cli_armed=False)
     except Exception as e:  # noqa: BLE001

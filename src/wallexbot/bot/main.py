@@ -50,7 +50,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from wallexbot.bot.feed import BAR_S, MIN_S, PublicFeed, ReplayFeed
 from wallexbot.bot.loop import Bot, BotParams
-from wallexbot.config import DEFAULT_PATH, Config, ConfigError, load_config
+from wallexbot.config import Config, ConfigError, load_config
 from wallexbot.data.candles import Candle
 from wallexbot.data.history import load_history
 from wallexbot.guardian.main import DEFAULT_INTERVAL_S as GUARDIAN_INTERVAL_S
@@ -398,7 +398,7 @@ def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
     p.add_argument("--max-ticks", type=int, default=None, help="stop after N ticks")
     p.add_argument("--interval-s", type=float, default=None,
                    help="replay: simulated seconds per tick (60); otherwise wall seconds between ticks (12)")
-    p.add_argument("--config", default=None, help="config YAML (default: config/default.yaml)")
+    p.add_argument("--config", default=None, help="config YAML (default: $WALLEXBOT_CONFIG, else the packaged default_config.yaml)")
     p.add_argument("--balance", default=str(DEFAULT_BALANCE), help="starting balance in the quote currency (USDT)")
     p.add_argument("--profile", default="strict", choices=PROFILES,
                    help="strict (default: S1 as specified) | demo (EXERCISE profile, relaxed thresholds, "
@@ -422,7 +422,7 @@ def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
         print("refused: --replay-from runs against the paper broker; use --mode mock", file=sys.stderr)
         return 2
     try:
-        cfg = load_config(args.config or DEFAULT_PATH, env={})   # never armed: no live path from here
+        cfg = load_config(args.config, env={})   # never armed: no live path from here
         balance = Decimal(args.balance)
     except (ConfigError, OSError, ArithmeticError, ValueError, KeyError) as e:
         print(f"refused: bad configuration: {e}", file=sys.stderr)
