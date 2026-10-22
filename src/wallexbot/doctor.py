@@ -51,7 +51,9 @@ _MUST_REFUSE = ("https://api.wallex.ir.example.com/v1/account/balances",
 UNVERIFIABLE = (
     "Withdraw permission is OFF on both keys: key permissions are not visible over the API; "
     "confirm on the Wallex API-key page (the code also refuses any withdraw path).",
-    "IP allow-list is set on both keys (if Wallex offers it): not visible over the API.",
+    "IP allow-list is set on both keys: the key form has an IP field (documented for withdrawals; "
+    "whether it also restricts Read/Trade calls is not documented), and it is not visible over "
+    "the API.",
     "The READ key has no Trade permission: proving it would take an order request, and the "
     "doctor sends only GETs.",
 )

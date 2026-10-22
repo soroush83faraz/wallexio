@@ -27,20 +27,31 @@ fund-movement paths are refused there). The key travels only in the X-API-Key he
 URL or body. Every exception message and log line here goes through redact(), and transport
 exceptions are summarised, never chained, so their arguments are not carried along.
 
-UNVERIFIED Wallex assumptions (no private request has been made; see WALLEX_INTEGRATION.md):
-  * paths: POST ORDERS_PATH, GET and DELETE ORDERS_PATH/{client_id}, GET OPEN_ORDERS_PATH,
-    BALANCES_PATH and FEE_PATH (constants below);
-  * envelope {"success": true, "result": ...}; errors {"success": false, "message": ...};
-  * create body: symbol, side BUY|SELL, type LIMIT|MARKET|STOP_LIMIT|STOP_MARKET, price,
-    quantity (decimal strings), client_id, and STOP_PRICE_FIELD for stops (spelling unverified,
-    which is why stop orders are refused unless allow_stop_orders=True);
-  * order object: clientOrderId, symbol, side, type, origQty, price, status, fills[] of
-    {price, quantity, fee, feeAsset}; executedQty (optional cross-check), transactTime (optional);
-  * status values: STATUS_MAP below; any other value => a conservative OPEN state, logged;
-  * balances: result.balances = {ASSET: {value (TOTAL), locked}}; free = value - locked;
-  * fee: result = {MARKET: {makerFeeRate, takerFeeRate}} as fractions (0.0025 = 0.25 %);
-  * openOrders: result.orders = [...], paged with PAGE_PARAM / PER_PAGE_PARAM;
-  * a 409, or a 4xx body mentioning a duplicate or the client id, means "client_id already used".
+Wallex API shapes. No private request has ever been made, so nothing here is tested against the
+live API. DOCUMENTED = stated in Wallex's public developer docs or Swagger files (retrieved
+2026-10-22; sources and excerpts in docs/WALLEX_INTEGRATION.md):
+  * the paths (constants below); headers x-api-key and sub-account-client-id; Content-Type:
+    application/json on every request; envelope {success, message, result}; error body
+    {success: false, code, message, result: {field: [messages]}};
+  * create body of strings: symbol, side BUY|SELL, type LIMIT|MARKET|STOP_LIMIT|STOP_MARKET,
+    price, quantity, client_id (letters, digits, underscore; a reused one creates no order), and
+    STOP_PRICE_FIELD only for stops; 201 on success; at most 20 creates per 10 s;
+  * order object: clientOrderId, symbol, side, type, origQty, price, status, executedQty,
+    transactTime, STOP_PRICE_RESPONSE_FIELD (spelled differently from the request field!) and
+    fills[] of {price, quantity, fee, feeAsset, symbol}; GET of an unknown client_id is a 404;
+  * openOrders is paged with PAGE_PARAM / PER_PAGE_PARAM; balances: result.balances =
+    {ASSET: {value, locked}}; fee: result = {MARKET: {makerFeeRate, takerFeeRate}}, fractions
+    in the docs' example ("0.00200000").
+UNVERIFIED (the docs are silent; each choice below fails closed or reconciles):
+  * status values beyond the examples NEW / FILLED / CANCELED and the prose-only FINISHED: see
+    STATUS_MAP and _FILLED_WHEN_COMPLETE; any other value => a conservative OPEN state, logged;
+  * the key under which openOrders lists orders (assumed "orders"; the docs show placeholders),
+    and whether a per_page of PER_PAGE is honoured there;
+  * balance ``value`` read as the TOTAL (free = value - locked), the conservative reading;
+  * stop orders: refused unless allow_stop_orders=True (trigger and locking behaviour unknown);
+  * HTTP statuses for a duplicate client_id, insufficient balance, rate limiting or a missing
+    permission: a 409, or a 4xx body mentioning a duplicate or the client id, is read as
+    "client_id already used" (ambiguous); 429 => RateLimited; 403 => AuthRejected.
 """
 from __future__ import annotations
 
@@ -81,8 +92,8 @@ FEE_PATH = "/v1/account/fee"
 ENDPOINT_PATHS = frozenset({ORDERS_PATH, OPEN_ORDERS_PATH, BALANCES_PATH, FEE_PATH})
 STOP_PRICE_FIELD = "stop_Price"             # documented REQUEST field (create body)
 STOP_PRICE_RESPONSE_FIELD = "stopPrice"     # documented RESPONSE field (order object)
-PAGE_PARAM, PER_PAGE_PARAM = "page", "per_page"   # UNVERIFIED openOrders paging parameters
-PER_PAGE, MAX_PAGES = 100, 20
+PAGE_PARAM, PER_PAGE_PARAM = "page", "per_page"   # documented openOrders query parameters
+PER_PAGE, MAX_PAGES = 100, 20               # 100 = the documented max of the order-list endpoint
 MAX_BODY_BYTES = 4 * 1024 * 1024
 MAX_FILLS = 1000
 USER_AGENT = "wallexbot/0.1"
@@ -759,8 +770,8 @@ class WallexBroker:
         if not isinstance(side, Side) or not isinstance(otype, OrderType):
             raise OrderRejected("side and type must be Side and OrderType members; nothing was sent")
         if otype in _STOPS and not self._allow_stop:
-            raise OrderRejected("stop orders are disabled: Wallex's stop-order fields are "
-                                "unverified (allow_stop_orders=False); nothing was sent")
+            raise OrderRejected("stop orders are disabled (allow_stop_orders=False): their status "
+                                "and balance locking on Wallex are unverified; nothing was sent")
         body = {"symbol": sym, "side": side.value, "type": otype.value,
                 "quantity": _wire(quantity, "quantity"), "client_id": cid}
         if otype in _PRICED:
