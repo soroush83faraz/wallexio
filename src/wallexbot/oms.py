@@ -1,9 +1,14 @@
 """Order management system. OMS.submit() is the ONLY code path that calls broker.submit_order.
 
 Invariants:
-- At most one broker submit per client_id, ever. An intent that already exists in the store is
-  never sent again; an intent found in RISK_APPROVED (possible crash mid-submit) is moved to
-  UNKNOWN_PENDING and reconciled, never resent.
+- At most one broker submit per client_id, ever. The broker is called only after the intent's
+  PROPOSED -> RISK_APPROVED transition has committed, by the caller that won it. An intent found in
+  RISK_APPROVED (possible crash mid-submit) is moved to UNKNOWN_PENDING and reconciled, never resent.
+- Resumable. submit() of an intent that already exists and is still PROPOSED (nothing can have
+  been sent) re-runs the risk transaction and proceeds: an earlier submit that failed on a store
+  error (e.g. `database is locked` after the 5 s busy timeout) is retried by submitting the same
+  intent again. A failure leaves either nothing (append_intent failed) or a resumable PROPOSED,
+  never a decision row without its state change.
 - Any ambiguous broker outcome (timeout, unexpected error, duplicate client_id) => UNKNOWN_PENDING;
   only reconcile() resolves it, by looking the order up by client_id and in open orders.
 - Fills are derived as deltas of the broker's cumulative fill totals, so re-reading the same
@@ -12,14 +17,18 @@ Invariants:
   currency; the exact cost basis (fees included) drives realized P&L, which is net of fees.
 - Risk decision and state change are ONE store transaction (BEGIN IMMEDIATE): the open-order view
   the risk engine sees, the risk_decisions row and PROPOSED -> RISK_APPROVED | REJECTED commit
-  together, so no other connection (the guardian) can observe a decided-but-PROPOSED intent, and
-  two actors' checks are serialised by SQLite's write lock.
+  together or not at all (any error inside rolls all of it back and propagates), so no other
+  connection (the guardian) can observe a decided-but-PROPOSED intent, and two actors' checks are
+  serialised by SQLite's write lock.
 - Committed SELLs (what an exit may not oversell) = open intents (OPEN_INTENT_STATES) plus every
-  SELL intent still PROPOSED and younger than PROPOSED_COMMIT_WINDOW_S (an actor is between
-  append_intent and its risk transaction). A PROPOSED older than that is a crash leftover: it is
-  ignored here and recover() settles it. A PROPOSED dated in the future (clock stepped back) counts
-  as young: fail closed. For a given intent only PROPOSED SELLs inserted BEFORE it count (store
-  insertion order), so of two racing exits the earlier one wins and they never block each other.
+  SELL intent still PROPOSED and "young": created less than PROPOSED_COMMIT_WINDOW_S ago and not
+  more than PROPOSED_FUTURE_SKEW_S in the future (an actor is between append_intent and its risk
+  transaction). Any other PROPOSED is a leftover (crash, store error, or dated ahead of a clock
+  that stepped back): it can never reach the broker by itself (only a resumed submit, which re-runs
+  the risk check, can send it), so it neither blocks nor counts here; oversell is still prevented
+  by the open intents counted above and by the exchange balance exits are sized from. For a given
+  intent only PROPOSED SELLs inserted BEFORE it count (store insertion order), so of two racing
+  exits the earlier one wins and they never block each other.
 - Timers on stored timestamps (not-found grace, stale-entry cancel) use clockstep.StepAnchors: a
   timestamp after `now` (backward clock step) re-anchors the timer at `now` instead of stalling it.
 """
@@ -41,12 +50,17 @@ S = IntentState
 OPEN_INTENT_STATES = frozenset({S.RISK_APPROVED, S.SUBMITTED, S.PARTIALLY_FILLED, S.UNKNOWN_PENDING})
 _RECONCILE_STATES = frozenset({S.SUBMITTED, S.PARTIALLY_FILLED, S.UNKNOWN_PENDING})
 PROPOSED_COMMIT_WINDOW_S = 30.0
+PROPOSED_FUTURE_SKEW_S = 5.0     # same tolerance as the guardian's max_quote_future_skew_s
 _ZERO = Decimal(0)
 
 
 def is_young_proposed(rec: IntentRecord, now: float, window_s: float = PROPOSED_COMMIT_WINDOW_S) -> bool:
-    """PROPOSED and created less than `window_s` before `now` (or after it: clock stepped back)."""
-    return rec.state is S.PROPOSED and not now - rec.created_at >= window_s
+    """PROPOSED and created within [now - window_s, now + PROPOSED_FUTURE_SKEW_S]. A PROPOSED dated
+    further in the future (the clock stepped back after it was written) is treated as a leftover:
+    otherwise a stuck one would block every exit until the clock caught up. Oversell stays prevented
+    without it (module doc). A NaN timestamp is never young."""
+    age = now - rec.created_at
+    return rec.state is S.PROPOSED and -PROPOSED_FUTURE_SKEW_S <= age < window_s
 
 
 class LedgerError(Exception):
@@ -185,25 +199,34 @@ class OMS:
                 self._cas(cid, S.RISK_APPROVED, S.UNKNOWN_PENDING, "resubmit_seen_risk_approved", now)
             return SubmitResult(cid, self._state(cid), sent=False)
 
-        with self.store.tx():   # risk view + decision + transition: one atomic step (see module doc)
-            rec = self.store.get_intent(cid)
-            if rec.state is not S.PROPOSED:   # settled by someone else (recover) meanwhile
-                return SubmitResult(cid, rec.state, sent=False)
-            try:
-                decision = self.risk.check(intent, quote, account, self.positions(),
-                                           self.committed_intents(now, before_seq=rec.seq), now)
-            except Exception as e:
-                decision = RiskDecision(False, (f"risk_error:{type(e).__name__}",))
-            self.store.append_risk_decision(cid, decision, ts=now)
-            try:
-                approved = self.approve(decision) is True
-            except Exception:
-                approved = False
-            if not approved:
-                self._cas(cid, S.PROPOSED, S.REJECTED, "risk:" + ",".join(decision.reasons), now)
-                return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
-            if not self._cas(cid, S.PROPOSED, S.RISK_APPROVED, "risk_approved", now):
-                return SubmitResult(cid, self._state(cid), sent=False, decision=decision)  # lost a race
+        try:
+            with self.store.tx():   # risk view + decision + transition: one atomic step (see module doc)
+                rec = self.store.get_intent(cid)
+                if rec.state is not S.PROPOSED:   # settled by someone else (recover) meanwhile
+                    return SubmitResult(cid, rec.state, sent=False)
+                try:
+                    decision = self.risk.check(intent, quote, account, self.positions(),
+                                               self.committed_intents(now, before_seq=rec.seq), now)
+                except Exception as e:
+                    decision = RiskDecision(False, (f"risk_error:{type(e).__name__}",))
+                self.store.append_risk_decision(cid, decision, ts=now)
+                try:
+                    approved = self.approve(decision) is True
+                except Exception:
+                    approved = False
+                # Store errors here are NOT swallowed: they roll the whole transaction back (no
+                # decision row without its state change) and propagate; the intent stays PROPOSED and
+                # a later submit() of the same intent resumes it.
+                if not approved:
+                    self.store.set_intent_state(cid, S.REJECTED, expected=S.PROPOSED,
+                                                reason="risk:" + ",".join(decision.reasons), ts=now)
+                    return SubmitResult(cid, S.REJECTED, sent=False, decision=decision)
+                self.store.set_intent_state(cid, S.RISK_APPROVED, expected=S.PROPOSED,
+                                            reason="risk_approved", ts=now)
+        except Exception as e:
+            self._log_error("oms.submit", f"risk transaction rolled back, intent stays proposed: {e!r}",
+                            {"client_id": cid}, now)
+            raise
         if not self._ks_allows(intent):  # last-moment gate
             self._cas(cid, S.RISK_APPROVED, S.REJECTED, "kill_switch", now)
             return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
@@ -310,12 +333,22 @@ class OMS:
             return False
 
     def _cas(self, cid: str, expected: IntentState, new: IntentState, reason: str, now: float) -> bool:
+        """Best-effort transition OUTSIDE any transaction (after a commit or a broker call): a
+        failure is logged and leaves the intent where it was, for recover()/reconcile()/a resumed
+        submit() to settle. Never call this inside store.tx(): it would hide a failure that must
+        roll the transaction back."""
         try:
             self.store.set_intent_state(cid, new, expected=expected, reason=reason, ts=now)
             return True
         except Exception as e:
-            self.store.append_error("oms.state", repr(e), {"client_id": cid}, ts=now)
+            self._log_error("oms.state", repr(e), {"client_id": cid}, now)
             return False
+
+    def _log_error(self, source: str, message: str, payload, now: float) -> None:
+        try:
+            self.store.append_error(source, message, payload, ts=now)
+        except Exception:
+            pass   # the database itself is failing; the caller sees the original error
 
     def _needs_review(self, cid: str, reason: str, now: float) -> None:
         st = self._state(cid)

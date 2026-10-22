@@ -271,3 +271,35 @@ def test_flatten_waits_for_young_proposed_and_ignores_stale(tmp_path):
 
 def test_monitor_in_flight_grace_matches_commit_window():
     assert GuardianConfig().in_flight_grace_s == PROPOSED_COMMIT_WINDOW_S
+
+
+def test_future_dated_proposed_beyond_skew_is_not_young():
+    """race2/race3: a PROPOSED written before a backward clock step is dated in the future. Within
+    the 5 s skew it still counts as young (an actor may be mid-submit); beyond it, it is a leftover
+    that neither blocks exits nor counts as committed."""
+    from wallexbot.oms import PROPOSED_FUTURE_SKEW_S, is_young_proposed
+    from wallexbot.store import IntentRecord
+    i = OrderIntent(SYM, Side.SELL, OrderType.MARKET, D("1.0000"), None, "x:race:f", reduce_only=True)
+
+    def rec(created, state=S.PROPOSED):
+        return IntentRecord(i, state, created, created)
+    now = 1_000_000.0
+    assert is_young_proposed(rec(now), now) and is_young_proposed(rec(now - 29), now)
+    assert not is_young_proposed(rec(now - PROPOSED_COMMIT_WINDOW_S), now)
+    assert is_young_proposed(rec(now + PROPOSED_FUTURE_SKEW_S), now)
+    assert not is_young_proposed(rec(now + PROPOSED_FUTURE_SKEW_S + 0.001), now)
+    assert not is_young_proposed(rec(now + 3600), now)
+    assert not is_young_proposed(rec(float("nan")), now)
+    assert not is_young_proposed(rec(now, S.RISK_APPROVED), now)
+
+
+def test_flatten_ignores_future_dated_leftover_proposed(tmp_path):
+    rig = Rig(tmp_path, guardian_sleep_advances=False)
+    full = rig.held.quantize(D("0.0001"), rounding="ROUND_DOWN")
+    ghost = OrderIntent(SYM, Side.SELL, OrderType.MARKET, full, None, "x:race:ghost", reduce_only=True)
+    rig.store.append_intent(ghost, ts=rig.clock() + 120)        # written before a 120 s backward step
+    g = rig.guardian
+    res = flatten_all(rig.gstore, rig.broker, g.oms, g.ks, cause="t3", hard=True,
+                      config=FlattenConfig(unknown_timeout_s=5.0, poll_interval_s=1.0),
+                      clock=rig.clock, sleep=lambda s: None)
+    assert len(rig.sell_submits) == 1 and res.symbols[SYM].status in ("flat", "dust")
