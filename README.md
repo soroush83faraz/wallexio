@@ -12,7 +12,7 @@ This is a hackathon submission. It does not promise profit. "No trades" is a val
 - A single order path: every order goes through the OMS, which calls the broker. Nothing else submits orders.
 - Fail-closed risk engine: any failed check blocks the order. A kill switch blocks new entries but not reduce-only exits.
 - An optional AI advisor (`ai/`, `advisor_bridge.py`) that can only veto or size down. It is off by default; `bot --advisor shadow` records its verdicts without acting on them (`apply` is never enabled). Its calls to the Anthropic API are tested against a fake transport only.
-- A guardian that reads the broker state and flattens positions on a hard breach (`guardian/`; the only component that engages the kill switch automatically). In this build it runs **inside the bot process**, on its own database connection and the bot's own paper/shadow broker (`--no-guardian` disables it). A separate guardian process only makes sense against a live exchange account, which does not exist here.
+- A guardian that reads the broker state and flattens positions on a hard breach (`guardian/`; besides the bot's own repeated-failure check, the only component that engages the kill switch automatically, and it releases only its own transient heartbeat engagement, docs/RISK.md). In this build it runs **inside the bot process**, on its own database connection and the bot's own paper/shadow broker (`--no-guardian` disables it). A separate guardian process only makes sense against a live exchange account, which does not exist here.
 - An append-only SQLite audit store (implemented in `store.py`).
 
 ## What exists now
@@ -23,7 +23,7 @@ Implemented and unit-tested (against the mock or synthetic data; nothing has run
 - Resumable historical 1m candle downloader (`data/history.py`), writing `data/history/<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv` (git-ignored). No CLI. `data/recorder.py::Recorder` appends depth and trades to `data/recorder/*.jsonl` (git-ignored); it has no CLI either, so it is started from a few lines of Python (docs/DEMO.md).
 - Strategy: S1 momentum-breakout entry engine, S0 trend baseline, cooldown, risk-based sizing and exit policies E1-E4 (`strategy/`). Parameter defaults are unvalidated placeholders ([docs/STRATEGY.md](docs/STRATEGY.md)).
 - Backtest engine with cost model, metrics, chronological splits with a single-use test-set guard, sensitivity analysis and a report writer, plus the runner behind `python -m wallexbot backtest` (`backtest/`). Execution costs are calibrated from a small sample of recorded order books ([docs/COSTS.md](docs/COSTS.md), low confidence).
-- Append-only SQLite store (`store.py`), fail-closed risk engine and kill switch (`risk/`), the OMS, the only caller of `broker.submit_order` (`oms.py`). The risk decision and the intent's state change commit in one transaction, and a SELL still being proposed counts as committed, so the bot's exit and the guardian's flatten never both sell one position (docs/RISK.md).
+- Append-only SQLite store (`store.py`), fail-closed risk engine and kill switch (`risk/`), the OMS, the only caller of `broker.submit_order` (`oms.py`). The risk decision and the intent's state change commit in one transaction (or not at all), and a SELL still being proposed counts as committed, so the bot's exit and the guardian's flatten never both sell one position; an intent left proposed by a store error is resumed on the next poll (docs/RISK.md).
 - Guardian: monitor and hard-breach flatten through the OMS (`guardian/`), run in-process by `bot`. `python -m wallexbot guardian --db NEW.db --mode mock --demo-db` is a standalone DEMO on its own mock broker; it refuses a bot's database.
 - Bot loop (`bot/`): S1 entries, E4 exits, risk-based sizing, every order through `pipeline.route_to_oms` -> `OMS.submit`; state is persisted and restored after a restart. `python -m wallexbot bot ...` (mock or shadow only). `--profile demo` is an **EXERCISE profile** (relaxed thresholds, `strategy/profiles.py`): with realistic costs strict S1 almost never trades (`reports/v2_summary.md`), so demo exists only to show the full lifecycle in mock/shadow. No edge is claimed; it prints a banner, is written into every bot audit event and the healthcheck, and is refused on any live path.
 - `ShadowBroker` (`exchange/shadow.py`): simulates fills from the cached public depth with conservative assumptions; local JSONL journal. Its fill model is an assumption set, not validated against real fills.
@@ -42,7 +42,7 @@ Requires Python 3.12. No credentials are needed or used.
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest -q
 ```
 
-Verified on the code at this commit: `pytest -q` reports 1872 passed.
+Verified on the code at this commit: `pytest -q` reports 1924 passed.
 
 Run it (all offline except `bot --mode shadow`, which makes public GET requests only):
 
