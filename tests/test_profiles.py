@@ -120,7 +120,7 @@ def test_healthcheck_reports_the_profile(tmp_path):
     now = s.audit_events("strategy", "heartbeat")[-1]["ts"]
     s.close()
     ns = hc.argparse.Namespace(db=str(db), max_heartbeat_age_s=120.0, alert_window_min=15.0,
-                               fail_on_killswitch=False, recorder_dir=None, max_recorder_age_s=300.0)
+                               allow_killswitch=False, recorder_dir=None, max_recorder_age_s=300.0)
     code, st = hc.run(ns, now=now)
     assert code == 0 and st["profile"] == "demo" and st["exercise_profile"] is True
     assert st["guardian_enabled"] is True and st["guardian_heartbeat_age_s"] is not None

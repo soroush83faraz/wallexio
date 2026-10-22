@@ -163,6 +163,32 @@ def test_deploy_doc_is_short_and_has_required_sections():
         assert needle in text, needle
 
 
+def _interval(argv):
+    return float(argv[argv.index("--interval-s") + 1])
+
+
+def test_deployed_bot_interval_is_within_half_the_data_age_and_probe_fails_on_kill_switch():
+    """The shipped bot commands pass the --interval-s bound (the bot refuses > max_data_age_s / 2,
+    15 s), and no shipped health probe opts out of failing on an engaged kill switch."""
+    from wallexbot.bot.main import max_interval_s
+    from wallexbot.config import load_config
+    limit = max_interval_s(load_config(env={}))
+    lines = _docker_lines()
+    assert _interval(json.loads(next(ln for ln in lines if ln.startswith("CMD ")).removeprefix("CMD "))) <= limit
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    assert _interval(compose["services"]["bot"]["command"]) <= limit
+    unit = (DEPLOY / "systemd" / "wallexbot-bot.service").read_text()
+    exec_start = next(ln for ln in unit.splitlines() if ln.startswith("ExecStart="))
+    assert _interval(exec_start.split()) <= limit
+    make = (ROOT / "Makefile").read_text()
+    assert float(re.search(r"^INTERVAL \?= (\S+)$", make, re.M).group(1)) <= limit
+    hc_lines = [ln for ln in lines if ln.startswith(("HEALTHCHECK", "CMD [\"python\", \"/app/deploy/health"))]
+    for text in ["\n".join(lines), make, unit, (ROOT / "docker-compose.yml").read_text()]:
+        assert "--allow-killswitch" not in "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+                                                     and "HEALTH_ARGS" not in ln), text[:40]
+    assert hc_lines and re.search(r"^HEALTH_ARGS \?=\s*$", make, re.M)
+
+
 def test_makefile_has_required_targets():
     text = (ROOT / "Makefile").read_text()
     for target in ("venv", "test", "demo", "backtest", "shadow", "guardian", "docker-build", "docker-up",
@@ -180,7 +206,7 @@ NOW = 1_800_000_000.0
 
 def _args(db, **kw):
     ns = healthcheck.argparse.Namespace(db=str(db), max_heartbeat_age_s=120.0, alert_window_min=15.0,
-                                        fail_on_killswitch=False, recorder_dir=None, max_recorder_age_s=300.0)
+                                        allow_killswitch=False, recorder_dir=None, max_recorder_age_s=300.0)
     for k, v in kw.items():
         setattr(ns, k, v)
     return ns
@@ -247,17 +273,37 @@ def test_other_components_heartbeat_does_not_count(store):
     assert _status(store)[0] == 1
 
 
-def test_killswitch_engaged_warns_unless_flagged(store):
+def test_killswitch_engaged_fails_unless_allowed(store):
+    """An engaged kill switch means no new entries: unhealthy by default (an unattended run that
+    can no longer trade must not look healthy). --allow-killswitch downgrades it to a warning."""
     store.heartbeat("strategy", ts=NOW - 1)
-    store.append_killswitch_event(True, "guardian: heartbeat_lost", "guardian", ts=NOW - 30)
+    store.append_killswitch_event(True, "guardian: balance_mismatch:BTC", "guardian", ts=NOW - 30)
     code, st = _status(store)
-    assert code == 0 and st["killswitch_engaged"] and st["killswitch_actor"] == "guardian"
-    assert st["warnings"] and not st["problems"]
-    code, st = _status(store, fail_on_killswitch=True)
-    assert code == 1 and st["problems"]
+    assert code == 1 and st["killswitch_engaged"] and st["killswitch_actor"] == "guardian"
+    assert st["problems"] and st["killswitch_auto_release"] is False
+    code, st = _status(store, allow_killswitch=True)
+    assert code == 0 and st["warnings"] and not st["problems"]
     store.append_killswitch_event(False, "operator ok", "operator", ts=NOW - 10)    # latest row wins
-    code, st = _status(store, fail_on_killswitch=True)
+    code, st = _status(store)
     assert code == 0 and st["killswitch_engaged"] is False
+
+
+def test_transient_killswitch_is_flagged_auto_release_and_still_fails(store):
+    store.heartbeat("strategy", ts=NOW - 1)
+    store.append_killswitch_event(True, "auto:heartbeat_lost", "guardian", ts=NOW - 30)
+    code, st = _status(store)
+    assert code == 1 and st["killswitch_auto_release"] is True and "transient" in st["problems"][0]
+    store.append_killswitch_event(True, "auto:heartbeat_lost", "operator", ts=NOW - 20)   # not the guardian's
+    assert _status(store)[1]["killswitch_auto_release"] is False
+
+
+def test_killswitch_cli_flags(store, capsys):
+    store.heartbeat("strategy", ts=time.time())
+    store.append_killswitch_event(True, "operator: maintenance", "operator", ts=time.time())
+    assert healthcheck.main(["--db", store.path]) == 1
+    assert healthcheck.main(["--db", store.path, "--fail-on-killswitch"]) == 1     # compatibility no-op
+    assert healthcheck.main(["--db", store.path, "--allow-killswitch"]) == 0
+    capsys.readouterr()
 
 
 def test_recent_alerts_fail_old_ones_do_not(store):
@@ -330,17 +376,17 @@ def test_recorder_dir_check(tmp_path):
     rec = tmp_path / "recorder"
     code, st = healthcheck.run(healthcheck.argparse.Namespace(db=None, recorder_dir=str(rec), max_recorder_age_s=300.0,
                                                               max_heartbeat_age_s=120.0, alert_window_min=15.0,
-                                                              fail_on_killswitch=False), now=time.time())
+                                                              allow_killswitch=False), now=time.time())
     assert code == 1 and "no *.jsonl" in st["problems"][0]
     rec.mkdir()
     (rec / "depth_20260101.jsonl").write_text("{}\n")
     code, st = healthcheck.run(healthcheck.argparse.Namespace(db=None, recorder_dir=str(rec), max_recorder_age_s=300.0,
                                                               max_heartbeat_age_s=120.0, alert_window_min=15.0,
-                                                              fail_on_killswitch=False), now=time.time())
+                                                              allow_killswitch=False), now=time.time())
     assert code == 0 and st["recorder_age_s"] < 5
     code, st = healthcheck.run(healthcheck.argparse.Namespace(db=None, recorder_dir=str(rec), max_recorder_age_s=300.0,
                                                               max_heartbeat_age_s=120.0, alert_window_min=15.0,
-                                                              fail_on_killswitch=False), now=time.time() + 1000)
+                                                              allow_killswitch=False), now=time.time() + 1000)
     assert code == 1
 
 

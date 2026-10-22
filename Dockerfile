@@ -28,9 +28,11 @@ RUN groupadd --system --gid 10001 wallex \
 VOLUME ["/data"]
 USER 10001:10001
 
-# Healthy = fresh strategy heartbeat (and in-process guardian heartbeat when enabled), no recent guardian alerts (read-only look at the DB).
+# Healthy = fresh strategy heartbeat (and in-process guardian heartbeat when enabled), kill switch NOT engaged
+# (an engaged switch fails the probe by default), no recent guardian alerts (read-only look at the DB).
 # The first heartbeat appears after the bot's first tick, hence the start period.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
     CMD ["python", "/app/deploy/healthcheck.py", "--db", "/data/bot.db"]
 
+# --interval-s must be <= max_data_age_s / 2 (15 s): the feed refreshes only on bot ticks.
 CMD ["python", "-m", "wallexbot", "bot", "--db", "/data/bot.db", "--mode", "shadow", "--balance", "1000", "--interval-s", "12"]

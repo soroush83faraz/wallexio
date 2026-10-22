@@ -13,7 +13,11 @@ Group=wallexbot
 WorkingDirectory=/opt/wallexbot
 EnvironmentFile=/etc/wallexbot/env
 ExecStart=/opt/wallexbot/.venv/bin/python -m wallexbot bot --db /var/lib/wallexbot/bot.db --mode shadow --balance 1000 --interval-s 12
+# --interval-s must be <= max_data_age_s / 2 (15 s), else the bot exits 2: the feed refreshes only on bot ticks.
 # The guardian runs inside this process (own DB connection, same shadow broker); there is no guardian unit.
+# Health probe (read-only), e.g. from a timer or your monitoring:
+#   /opt/wallexbot/.venv/bin/python /opt/wallexbot/deploy/healthcheck.py --db /var/lib/wallexbot/bot.db
+# It exits 1 while the kill switch is engaged (no new entries); add --allow-killswitch to only warn.
 # SIGTERM: the bot finishes its current tick, then exits 0.
 KillSignal=SIGTERM
 TimeoutStartSec=60

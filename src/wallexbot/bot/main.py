@@ -11,7 +11,12 @@
   price precision from the data).
 - `--mode mock` without replay: PublicFeed (public GETs to api.wallex.ir only) mirrored into a
   paper MockWallex; `--mode shadow`: PublicFeed + ShadowBroker (exchange/shadow.py, simulated
-  fills against the live public book). --interval-s is wall-clock seconds between ticks (12).
+  fills against the live public book). --interval-s is wall-clock seconds between ticks (12); it
+  must be <= max_data_age_s / 2 (15 s by default), else exit 2 (interval_problem()): the feed
+  refreshes only on bot ticks, and this bound keeps every quote the guardian sees, on its ticks
+  in between included, younger than max_data_age_s.
+- Replay: --interval-s is SIMULATED seconds per tick, in (0, 900]; the replay feed is re-stamped
+  every tick and the guardian ticks at the same simulated instant, so it cannot age.
 - SIGINT / SIGTERM stop the loop after the current tick.
 
 Guardian (default on; --no-guardian disables it): an InProcessGuardian (guardian/main.py) with its
@@ -197,6 +202,27 @@ def _run_info(mode: str, profile: str, guardian: bool, guardian_interval_s: floa
             **extra}
 
 
+def max_interval_s(config: Config) -> float:
+    """Longest allowed wall-clock --interval-s for the live-feed loops: max_data_age_s / 2 (15 s)."""
+    return float(config.max_data_age_s) / 2
+
+
+def interval_problem(interval_s: float, config: Config) -> str | None:
+    """Why a live-feed (mock / shadow without replay) tick interval is refused, or None.
+
+    The feed (and so every quote the bot and the guardian see) refreshes only on bot ticks, and a
+    quote older than max_data_age_s (30 s) is stale. With interval_s <= max_data_age_s / 2 the
+    oldest quote the guardian can see on any of its ticks, including the wake-ups while the bot
+    sleeps, is under interval_s + the feed's per-symbol poll interval (12 s) <= 27 s: never stale
+    on a healthy feed."""
+    limit = max_interval_s(config)
+    if not 0 < interval_s <= limit:
+        return (f"--interval-s {interval_s:g} is outside (0, {limit:g}] s: the market data refreshes only on bot "
+                f"ticks and quotes older than max_data_age_s ({float(config.max_data_age_s):g} s) count as stale, so "
+                f"the interval may be at most max_data_age_s / 2")
+    return None
+
+
 def _guarded_sleep(sleep: Callable[[float], Any], total: float, guardian: InProcessGuardian | None,
                    stop: StopFlag) -> None:
     """Sleep `total` seconds; with a guardian, in chunks of its interval, ticking it in between."""
@@ -311,6 +337,9 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
                   guardian_interval_s: float = GUARDIAN_INTERVAL_S) -> dict[str, Any]:
     """mock (paper broker mirrored from the public book) or shadow (ShadowBroker) on PublicFeed. The
     guardian ticks after every bot tick and, during longer sleeps, every guardian_interval_s."""
+    problem = interval_problem(interval_s, config)
+    if problem is not None:
+        raise BotSetupError(problem)
     stop = stop or StopFlag()
     sleep = sleep or stop.wait
     if client is None:
@@ -395,6 +424,16 @@ def main(argv: Sequence[str] | None = None, *, advisor: Any = None,
     if not 0 < args.guardian_interval_s <= 3600:
         print("refused: --guardian-interval-s must be in (0, 3600]", file=sys.stderr)
         return 2
+    if args.replay_from:
+        if args.interval_s is not None and not 0 < args.interval_s <= BAR_S:
+            print(f"refused: replay --interval-s (simulated seconds per tick) must be in (0, {BAR_S}]",
+                  file=sys.stderr)
+            return 2
+    else:
+        problem = interval_problem(args.interval_s if args.interval_s is not None else 12.0, cfg)
+        if problem is not None:
+            print(f"refused: {problem}", file=sys.stderr)
+            return 2
     guardian = not args.no_guardian
     if guardian and str(args.db) == ":memory:":
         print("refused: the in-process guardian needs a database file; use a path or --no-guardian",

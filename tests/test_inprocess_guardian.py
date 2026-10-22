@@ -118,24 +118,100 @@ def test_guardian_needs_a_database_file(tmp_path, capsys):
     assert "needs a database file" in capsys.readouterr().err
 
 
-def test_feed_loop_ticks_guardian_between_long_sleeps(tmp_path):
-    """Bot interval 60 s, guardian interval 15 s: one guardian tick after each bot tick plus three
-    while the bot sleeps; same broker object for both."""
-    clock = MockClock(1_700_000_000)
+def _fake_client(clock):
     c = FakeClient(clock)
     c.ranked = [_rules(SYM)]
     c.books = {SYM: ("100", "100.01", "1000")}
+    return c
 
-    def sleep(s):
-        clock.advance(s)
-    out = bot_main.run_feed_loop("mock", tmp_path / "f.db", cheap_config(), interval_s=60, max_ticks=3, client=c,
-                                 clock=clock, sleep=sleep, guardian_interval_s=15)
-    assert out["ticks"] == 3 and out["guardian"] == {"ticks": 3 + 2 * 3, "failed": 0}
+
+def test_feed_loop_ticks_guardian_between_sleeps(tmp_path):
+    """Bot interval 15 s, guardian interval 5 s: one guardian tick after each bot tick plus two
+    while the bot sleeps; same broker object for both."""
+    clock = MockClock(1_700_000_000)
+    out = bot_main.run_feed_loop("mock", tmp_path / "f.db", cheap_config(), interval_s=15, max_ticks=3,
+                                 client=_fake_client(clock), clock=clock, sleep=clock.advance, guardian_interval_s=5)
+    assert out["ticks"] == 3 and out["guardian"] == {"ticks": 3 + 2 * 2, "failed": 0}
     s = Store(tmp_path / "f.db")
     try:
         assert s.equity_hwm() == D("1000")                       # the paper broker's balance
     finally:
         s.close()
+
+
+def test_guardian_wakeups_between_bot_ticks_never_see_a_stale_feed(tmp_path):
+    """The feed refreshes only on bot ticks. With the largest allowed bot interval (15 s) and a
+    guardian waking every 5 s in between, a HELD symbol's quote is never older than
+    max_data_age_s (30 s) at any guardian tick: no stale_feed, no kill switch."""
+    from wallexbot.types import Position
+    db = tmp_path / "held.db"
+    seed = Store(db)
+    seed.append_position_snapshot(Position(SYM, D("1"), D("100")))
+    seed.close()
+    clock = MockClock(1_700_000_000)
+    out = bot_main.run_feed_loop("mock", db, cheap_config(), interval_s=bot_main.max_interval_s(cheap_config()),
+                                 max_ticks=12, client=_fake_client(clock), clock=clock, sleep=clock.advance,
+                                 balances={"USDT": D("1000"), "BTC": D("1")}, guardian_interval_s=5)
+    assert out["guardian"]["failed"] == 0 and out["guardian"]["ticks"] == 12 + 11 * 2
+    assert out["tracked"] == [SYM] and out["kill_switch_engaged"] is False
+    s = Store(db)
+    try:
+        ticks = s.audit_events("guardian", "tick")
+        assert ticks and not [t for t in ticks if any(c.startswith("stale") for c in t["payload"]["conditions"])]
+        assert all(t["payload"]["feed_age_s"] is not None for t in ticks)      # SYM is held: it is watched
+        assert not s.rows("killswitch_events")
+    finally:
+        s.close()
+
+
+def test_held_symbol_whose_feed_dies_is_reported_stale_without_kill_switch(tmp_path):
+    """Control for the test above: the same run with the depth endpoint failing goes stale."""
+    from wallexbot.types import Position
+    db = tmp_path / "dead.db"
+    seed = Store(db)
+    seed.append_position_snapshot(Position(SYM, D("1"), D("100")))
+    seed.close()
+    clock = MockClock(1_700_000_000)
+    c = _fake_client(clock)
+    real_depth = c.depth
+    calls = {"n": 0}
+
+    def depth(sym):
+        calls["n"] += 1
+        if calls["n"] > 2:
+            raise OSError("timeout")
+        return real_depth(sym)
+    c.depth = depth
+    bot_main.run_feed_loop("mock", db, cheap_config(), interval_s=15, max_ticks=8, client=c, clock=clock,
+                           sleep=clock.advance, balances={"USDT": D("1000"), "BTC": D("1")}, guardian_interval_s=5)
+    s = Store(db)
+    try:
+        conds = [c for t in s.audit_events("guardian", "tick") for c in t["payload"]["conditions"]]
+        assert f"stale_feed:{SYM}" in conds
+        assert not [r for r in s.rows("killswitch_events") if "stale" in r["reason"]]
+    finally:
+        s.close()
+
+
+@pytest.mark.parametrize("interval", ["16", "60", "90", "0"])
+def test_feed_loop_interval_above_half_max_data_age_is_refused(tmp_path, capsys, interval):
+    """Verifier: --interval-s 90 latched the kill switch (the feed only refreshes on bot ticks)."""
+    db = tmp_path / "x.db"
+    assert bot_main.main(["--db", str(db), "--mode", "shadow", "--interval-s", interval]) == 2
+    err = capsys.readouterr().err
+    assert "refused" in err and "max_data_age_s / 2" in err and not db.exists()
+    with pytest.raises(bot_main.BotSetupError):
+        bot_main.run_feed_loop("mock", db, cheap_config(), interval_s=float(interval), max_ticks=1,
+                               client=_fake_client(MockClock(1_700_000_000)))
+    assert not db.exists()
+
+
+def test_replay_interval_is_simulated_and_not_bounded_by_data_age(tmp_path):
+    db = tmp_path / "r.db"
+    assert bot_main.main(["--db", str(db), "--mode", "mock", "--replay-from", str(_replay_dir(tmp_path)),
+                          "--max-ticks", "3", "--interval-s", "90"]) == 0
+    assert bot_main.main(["--db", str(db), "--mode", "mock", "--replay-from", str(_replay_dir(tmp_path)),
+                          "--max-ticks", "3", "--interval-s", "901"]) == 2
 
 
 def test_inprocess_guardian_flattens_through_the_bot_broker_on_hard_breach(tmp_path):

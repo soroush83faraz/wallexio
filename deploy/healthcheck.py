@@ -10,8 +10,13 @@ Checks (table and column names come from wallexbot/store.py):
     (strict | demo, reported as "profile"; "exercise_profile" is true for demo) and whether the
     in-process guardian is enabled. If it is, the guardian heartbeat (actor='guardian',
     kind='heartbeat') must be younger than --max-heartbeat-age-s too.
-  * kill switch: latest killswitch_events row. Engaged is REPORTED and exits 0 with a warning,
-    unless --fail-on-killswitch is given (then exit 1).
+  * kill switch: latest killswitch_events row. Engaged is UNHEALTHY (exit 1) by default: an engaged
+    switch means no new entries, so an unattended run that looks healthy while it cannot trade is
+    exactly what this probe must catch. --allow-killswitch downgrades it to a warning (e.g. while an
+    operator investigates). "killswitch_auto_release" is true when the latest row is the guardian's
+    own transient ('auto:') engagement, which the guardian releases itself once the condition has
+    been clear for 3 ticks and 60 s. (--fail-on-killswitch is accepted for compatibility; it is the
+    default now.)
   * alerts in the last --alert-window-min minutes (default 15), any of: errors rows whose source
     starts with 'guardian.' (guardian.needs_review, guardian.monitor, guardian.loop, ...),
     audit_events kind 'needs_review', order_intents in state 'needs_review'. Any => unhealthy.
@@ -42,7 +47,7 @@ def _open_ro(db: str) -> sqlite3.Connection:
 
 
 def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_min: float,
-             fail_on_killswitch: bool) -> dict:
+             allow_killswitch: bool = False) -> dict:
     problems: list[str] = []
     warnings: list[str] = []
     out: dict = {}
@@ -83,8 +88,11 @@ def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_mi
         if engaged:
             out["killswitch_reason"] = ks[1]
             out["killswitch_actor"] = ks[2]
+            out["killswitch_auto_release"] = ks[2] == "guardian" and str(ks[1]).startswith("auto:")
             msg = f"kill switch engaged by {ks[2]}: {ks[1]}"
-            (problems if fail_on_killswitch else warnings).append(msg)
+            if out["killswitch_auto_release"]:
+                msg += " (transient: the guardian releases it once clear)"
+            (warnings if allow_killswitch else problems).append(msg)
 
         since = now - alert_window_min * 60.0
         n_err = conn.execute("SELECT COUNT(*) FROM errors WHERE ts>=? AND source LIKE 'guardian.%'",
@@ -138,7 +146,7 @@ def run(args: argparse.Namespace, now: float | None = None) -> tuple[int, dict]:
         if args.db:
             parts.append(check_db(args.db, now=now, max_heartbeat_age_s=args.max_heartbeat_age_s,
                                   alert_window_min=args.alert_window_min,
-                                  fail_on_killswitch=args.fail_on_killswitch))
+                                  allow_killswitch=bool(getattr(args, "allow_killswitch", False))))
         if args.recorder_dir:
             parts.append(check_recorder(args.recorder_dir, now=now, max_age_s=args.max_recorder_age_s))
     except (sqlite3.Error, OSError) as e:
@@ -157,7 +165,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-heartbeat-age-s", type=float, default=120.0)
     p.add_argument("--alert-window-min", type=float, default=15.0,
                    help="alert rows newer than this many minutes make the probe fail")
-    p.add_argument("--fail-on-killswitch", action="store_true", help="exit 1 while the kill switch is engaged")
+    p.add_argument("--allow-killswitch", action="store_true",
+                   help="report an engaged kill switch as a warning instead of failing (default: exit 1)")
+    p.add_argument("--fail-on-killswitch", action="store_true",
+                   help="compatibility no-op: an engaged kill switch fails by default")
     p.add_argument("--recorder-dir", help="also require fresh *.jsonl output in this directory")
     p.add_argument("--max-recorder-age-s", type=float, default=300.0)
     args = p.parse_args(argv)
