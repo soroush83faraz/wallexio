@@ -1,0 +1,55 @@
+[Unit]
+Description=wallexbot shadow bot (simulated fills, no orders sent)
+Documentation=file:///opt/wallexbot/docs/DEPLOY.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=wallexbot
+Group=wallexbot
+WorkingDirectory=/opt/wallexbot
+EnvironmentFile=/etc/wallexbot/env
+ExecStart=/opt/wallexbot/.venv/bin/python -m wallexbot bot --db /var/lib/wallexbot/bot.db --mode shadow --balance 1000 --interval-s 12
+# SIGTERM: the bot finishes its current tick, then exits 0.
+KillSignal=SIGTERM
+TimeoutStartSec=60
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=10
+
+# State: /var/lib/wallexbot (SQLite DB + shadow journal). The checkout in /opt/wallexbot is read-only to the service.
+StateDirectory=wallexbot
+StateDirectoryMode=0750
+UMask=0027
+ReadWritePaths=/var/lib/wallexbot
+
+# Hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+MemoryMax=768M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,52 @@
+[Unit]
+Description=wallexbot market-data recorder (public GETs only)
+Documentation=file:///opt/wallexbot/docs/DEPLOY.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=wallexbot
+Group=wallexbot
+WorkingDirectory=/opt/wallexbot
+EnvironmentFile=/etc/wallexbot/env
+ExecStart=/opt/wallexbot/.venv/bin/python /opt/wallexbot/deploy/run_recorder.py --out-dir /var/lib/wallexbot/recorder --interval-s 15
+KillSignal=SIGTERM
+TimeoutStartSec=60
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=10
+
+StateDirectory=wallexbot
+StateDirectoryMode=0750
+UMask=0027
+ReadWritePaths=/var/lib/wallexbot
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

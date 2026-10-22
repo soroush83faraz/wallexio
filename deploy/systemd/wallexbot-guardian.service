@@ -1,0 +1,59 @@
+# OPT-IN: do not enable on a shadow bot's database in this build. The guardian CLI is a demo loop that watches its
+# own in-memory mock broker (10000 USDT) and writes equity high-water marks to the shared DB, which blocks a bot
+# started with --balance 1000 (looks like a 90% drawdown). See docs/DEPLOY.md, "Guardian".
+[Unit]
+Description=wallexbot guardian (one per database; shadow mode)
+Documentation=file:///opt/wallexbot/docs/DEPLOY.md
+# Start after the bot, stop before it, and follow its stop/restart.
+# Start the bot first: a guardian that sees no strategy heartbeat for 60 s engages the kill switch.
+After=wallexbot-bot.service
+PartOf=wallexbot-bot.service
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=wallexbot
+Group=wallexbot
+WorkingDirectory=/opt/wallexbot
+EnvironmentFile=/etc/wallexbot/env
+ExecStart=/opt/wallexbot/.venv/bin/python -m wallexbot guardian --db /var/lib/wallexbot/bot.db --mode shadow
+KillSignal=SIGTERM
+TimeoutStartSec=60
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=10
+
+StateDirectory=wallexbot
+StateDirectoryMode=0750
+UMask=0027
+ReadWritePaths=/var/lib/wallexbot
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target
