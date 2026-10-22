@@ -1,6 +1,6 @@
 # Deploying wallexbot (shadow mode, single host)
 
-Status: **shadow only.** The bot reads public order books from `api.wallex.ir` (GET only) and simulates fills (`ShadowBroker`); no order is ever sent and no key is needed. Live trading does not exist in this build. An earlier revision of this page was checked by building the image (with a local base image) and running the demo, guardian and healthcheck inside it, offline, read-only and as a non-root user. The in-process guardian of this revision was checked with the test suite only (no image rebuild). Nothing was run for a day against the real API and the systemd units were not started on a live systemd.
+Status: **shadow only.** The bot reads public order books from `api.wallex.ir` (GET only) and simulates fills (`ShadowBroker`); no order is ever sent and no key is needed. Live trading does not exist in this build. **Verified on this revision** (one Linux host, Docker 29 from snap): the shipped Dockerfile builds (base pulled through a registry mirror, see below). In the image, offline (`--network none`), read-only root, `--cap-drop ALL`, uid 10001: `demo`, `bot --mode mock --replay-from`, and `bot --mode live` (refused, exit 2). With network, the default CMD (shadow) ran 160 s, `HEALTHCHECK` turned `healthy`, `docker stop` ended it with exit 0 in about 2 s and `PRAGMA integrity_check` on the DB was `ok`. `docker compose up -d` for the bot service behaved the same (see the `no-new-privileges` caveat), and `record` and `history` ran in the image against the real public API. A non-editable wheel was installed into a fresh venv outside the repo and ran `demo`, a config load and the live refusal. The systemd units were exercised only as `systemd-run --user` transient units carrying the sandbox properties a user manager supports (it cannot apply `CapabilityBoundingSet=`), not as the system units themselves. **Not verified:** a run longer than a few minutes against the real API, any real fill, the system-level units, the compose `recorder` profile.
 
 ## Prerequisites
 
@@ -13,25 +13,30 @@ Status: **shadow only.** The bot reads public order books from `api.wallex.ir` (
 ```bash
 git clone <repo> && cd Wallex
 docker compose up -d --build          # the shadow bot (guardian in-process); add --profile recorder for recording
+# Docker Hub blocked/denied here? Build the same pinned tag through a registry mirror:
+BASE_IMAGE=docker.arvancloud.ir/library/python:3.12.11-slim-bookworm docker compose up -d --build
+# plain docker: docker build --build-arg BASE_IMAGE=<mirror>/library/python:3.12.11-slim-bookworm -t wallexbot:shadow .
 docker compose ps                     # STATUS shows (healthy) after ~2 min
 docker compose logs -f bot
 ```
 
-`.env` is optional (shadow needs no secrets). If you create one, copy `.env.example` or `deploy/env.example` and fill only what you need. The image runs as uid 10001 on a read-only root filesystem with `/tmp` as tmpfs, all capabilities dropped, `no-new-privileges`, memory/CPU/pids limits, no published ports. State lives in the named volume `wallex-data` mounted at `/data` (`bot.db`, `shadow_journal.jsonl`, `recorder/`).
+`.env` is optional (shadow needs no secrets). If you create one, copy `.env.example` or `deploy/env.example` and fill only what you need. The image runs as uid 10001 on a read-only root filesystem with `/tmp` as tmpfs, all capabilities dropped, `no-new-privileges`, `init: true` (tini as PID 1, so a SIGTERM during interpreter start-up is not ignored), memory/CPU/pids limits, no published ports. State lives in the named volume `wallex-data` mounted at `/data` (`bot.db`, `shadow_journal.jsonl`, `recorder/`). The package is installed non-editable and carries its own default config; `WALLEXBOT_CONFIG=/path.yaml` overrides it (docs/CONFIG_ENV.md; mount the file read-only and set the variable in `.env`).
+
+**`no-new-privileges` caveat.** On the tested host (snap Docker) every container with `no-new-privileges:true` failed at start (`exec /sbin/docker-init: operation not permitted`; `docker run --security-opt no-new-privileges:true python:3.12-slim true` fails too), so it is a host problem, not the image. If you see it, run with an override file `services: {bot: {security_opt: !reset []}}` (`docker compose -f docker-compose.yml -f override.yml up -d`) and move to a non-snap Docker when you can; do not weaken the shipped file.
 
 ## systemd
 
 ```bash
 sudo useradd --system --home-dir /var/lib/wallexbot --shell /usr/sbin/nologin wallexbot
 sudo git clone <repo> /opt/wallexbot && cd /opt/wallexbot
-sudo python3.12 -m venv .venv && sudo .venv/bin/pip install -e .   # editable on purpose: config/ is found relative to the source tree
+sudo python3.12 -m venv .venv && sudo .venv/bin/pip install .   # regular install: the default config is package data
 sudo install -d -m 0750 -o root -g wallexbot /etc/wallexbot
 sudo install -m 0640 -o root -g wallexbot deploy/env.example /etc/wallexbot/env
 sudo cp deploy/systemd/wallexbot-bot.service /etc/systemd/system/    # (+ wallexbot-recorder.service if wanted)
 sudo systemctl daemon-reload && sudo systemctl enable --now wallexbot-bot
 ```
 
-The checkout is root-owned and read-only to the service; the service user can write only `/var/lib/wallexbot` (`StateDirectory`, `ProtectSystem=strict`). Units set `NoNewPrivileges`, `PrivateTmp`, an empty capability set, a syscall filter and `Restart=on-failure`.
+The checkout is root-owned and read-only to the service; the service user can write only `/var/lib/wallexbot` (`StateDirectory`, `ProtectSystem=strict`). Units set `NoNewPrivileges`, `PrivateTmp`, an empty capability set, a syscall filter (`~@privileged` only: also denying `@resources` made numpy/pandas die with SIGSYS at import under `systemd-run --user`) and `Restart=on-failure`. The recorder unit runs `python -m wallexbot record --out /var/lib/wallexbot/recorder`; `history` is the same kind of one-shot command (docs/DEMO.md).
 
 ## Guardian: read this first
 
@@ -64,7 +69,7 @@ Use the online backup, never `cp` of `bot.db` alone (WAL files hold recent rows)
 ## Upgrade
 
 1. Stop the services; back up the DB (above).
-2. `git pull` (check `git log` and `docs/` for schema changes), then `docker compose up -d --build`, or `pip install -e .` in `/opt/wallexbot` and `systemctl restart`.
+2. `git pull` (check `git log` and `docs/` for schema changes), then `docker compose up -d --build`, or `.venv/bin/pip install --upgrade .` in `/opt/wallexbot` and `systemctl restart`.
 3. Check `healthcheck` and the logs. State is restored from the DB after a restart.
 
 ## Do not

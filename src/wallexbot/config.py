@@ -11,7 +11,10 @@ import yaml
 from wallexbot.exchange.auth import AuthError, assert_live_armed
 from wallexbot.redact import is_sensitive_key
 
-DEFAULT_PATH = Path(__file__).resolve().parents[2] / "config" / "default.yaml"
+# The default config is PACKAGE DATA (wallexbot/default_config.yaml, declared in pyproject), so a plain
+# non-editable `pip install .` finds it. WALLEXBOT_CONFIG=/path/file.yaml overrides it (same fail-closed loader).
+CONFIG_ENV_VAR = "WALLEXBOT_CONFIG"
+DEFAULT_PATH = Path(__file__).resolve().with_name("default_config.yaml")
 ALLOWED_HOSTS = frozenset({"api.wallex.ir"})
 
 
@@ -63,11 +66,27 @@ class Config:
     max_data_age_s: int
 
 
-def load_config(path: Path | str = DEFAULT_PATH, env: dict | None = None, *,
+def resolve_config_path(path: Path | str | None = None) -> Path:
+    """Explicit ``path`` > ``$WALLEXBOT_CONFIG`` (non-empty) > the packaged default. Read from the process
+    environment, not from load_config's ``env`` (which only carries the live-arming variables)."""
+    if path is not None:
+        return Path(path)
+    override = os.environ.get(CONFIG_ENV_VAR, "").strip()
+    return Path(override) if override else DEFAULT_PATH
+
+
+def load_config(path: Path | str | None = None, env: dict | None = None, *,
                 cli_armed: bool = False) -> Config:
-    """``cli_armed`` is the CLI's --arm-live flag; live mode needs it (see assert_live_armed)."""
+    """``cli_armed`` is the CLI's --arm-live flag; live mode needs it (see assert_live_armed).
+    ``path`` None: ``$WALLEXBOT_CONFIG`` if set, else the packaged default config."""
     env = os.environ if env is None else env
-    raw = yaml.safe_load(Path(path).read_text())
+    cfg_path = resolve_config_path(path)
+    try:
+        raw = yaml.safe_load(cfg_path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"cannot read config {cfg_path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(f"config {cfg_path} is not a mapping")
     leaked = _secret_like_path(raw)
     if leaked:
         raise ConfigError(f"config key {leaked!r} looks like a secret; "

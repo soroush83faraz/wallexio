@@ -17,17 +17,20 @@ loses money on every train/validation configuration ([reports/README.md](../repo
 
 | Check | Result |
 |---|---|
-| `pytest -q` | 1948 passed (fresh clone, fresh venv, ~2 min) |
+| `pytest -q` | 1970 passed (fresh venv, ~2 min; was 1948 at the first handoff) |
 | `ruff check --select F,E9` (src, tests, deploy) | clean (run in a throwaway venv; ruff is not a project dependency) |
 | `mypy --ignore-missing-imports src` | **113 findings in 24 files**, informational. The project has no type-check config and was never type-clean; not addressed |
-| `pip wheel .` | builds, but the wheel does **not** contain `config/default.yaml` (see limitations) |
+| `pip wheel .` / non-editable install | wheel contains `wallexbot/default_config.yaml` (inspected by `tests/test_packaging.py`); installed into a fresh venv **outside the repo** it ran `demo`, loaded the default config and refused `bot --mode live` (exit 2) |
+| `docker build` of the shipped Dockerfile | builds with `--build-arg BASE_IMAGE=docker.arvancloud.ir/library/python:3.12.11-slim-bookworm` (same pinned tag via a mirror). In the image: offline `demo`, `bot --mode mock --replay-from` (synthetic 3-day history, 600 ticks) and `bot --mode live` (exit 2) with `--network none --read-only --cap-drop ALL --user 10001`; shadow default CMD 160 s with network: HEALTHCHECK `healthy`, `docker stop` exit 0 (about 2 s), `PRAGMA integrity_check` ok, no WAL left behind |
+| `docker compose` | `config` ok; `up -d` of the bot service healthy, `stop` exit 0, `down -v` clean. **`no-new-privileges:true` fails on the tested snap-Docker host for every image**, so compose was run with `security_opt` reset (docs/DEPLOY.md) |
+| systemd units | `systemd-analyze verify` plus `systemd-run --user` transient units with the supported sandbox properties: bot ran, health ok, `systemctl stop` graceful; recorder ran. This found a real bug (`SystemCallFilter=~@resources` killed numpy/pandas with SIGSYS), fixed. The system units were not installed |
 | Offline commands in README/DEMO | `demo`, `bot --mode mock --replay-from data/history` (strict and demo), `guardian --demo-db` re-run and match the docs |
 | Live shadow runs on the public API | 12 min demo profile and 2 h strict profile: 0 guardian failures, kill switch never engaged, healthcheck ok. Neither produced a signal (quiet market / strict gate), so **no live fill path was exercised** |
 
 ## How to resume
 
 ```bash
-python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest -q   # editable install is required
+python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest -q   # a plain `pip install .` works too
 .venv/bin/python -m wallexbot demo
 .venv/bin/python -m wallexbot bot --db /tmp/shadow.db --mode shadow --balance 1000     # public GETs only
 .venv/bin/python deploy/healthcheck.py --db /tmp/shadow.db
@@ -41,8 +44,8 @@ Deployment (Docker, systemd, healthcheck, backup): [DEPLOY.md](DEPLOY.md). Modul
 - `data/history/`: 1m candles, 45 days, 7 USDT symbols (BTC ETH XRP XAUT USOON PEPE SOL) plus PUMP (15 days only).
   The 4 lowest-ranked symbols of the top 12 were never fetched. `MANIFEST.json` describes it. Exchange-wide gaps exist.
 - `data/recorder/`: order-book and trade snapshots. **A recorder process was still running when this was written**
-  (started from a throwaway script outside the repo; it stops by itself after 1440 cycles of 15 s). It has no CLI:
-  see DEMO.md for the few lines of Python. The cost calibration used only about 1.2 hours of it (sessions had gaps).
+  (started from a throwaway script outside the repo; it stops by itself after 1440 cycles of 15 s). Recorders are now
+  started with `python -m wallexbot record` (DEMO.md). The cost calibration used only about 1.2 hours of it (sessions had gaps).
 
 ## Decisions taken with the user at the start
 
@@ -69,17 +72,24 @@ instead of per-order human approval; no ICT strategy (the code was not available
    A separate guardian process is meaningful only against a live exchange account.
 8. **The AST single-order-path guard is a lint, not a proof**; its known misses are listed in ARCHITECTURE.md.
 9. **Redaction** misses a few exotic encodings (base64 of UTF-16, JSON `\u` escapes inside strings). Keep secrets in `Secret`.
-10. **Packaging**: `config.DEFAULT_PATH` is resolved relative to the source tree, so a plain `pip install .` cannot find
-    `config/default.yaml`; use an editable install (the Dockerfile does).
-11. **Docker image never built from the shipped Dockerfile**: the pinned base tag could not be pulled in the build
-    environment (a substitute base was used for the smoke test) and `no-new-privileges` could not be tested. systemd
-    units were only checked with `systemd-analyze verify`.
+10. ~~Packaging~~ **Fixed**: the default config is package data (`src/wallexbot/default_config.yaml`), so a plain
+    `pip install .` works; `WALLEXBOT_CONFIG=/path.yaml` overrides it (docs/CONFIG_ENV.md). `config.py` locates the file
+    next to the module instead of using `importlib.resources`, because the single-order-path AST guard bans `importlib`
+    in `src/` (the guard was left untouched). Zip-imported installs are therefore not supported (pip never makes them).
+11. **Docker/systemd verified on one host only** (see the quality-gates table). Docker Hub is blocked on some networks:
+    build with `--build-arg BASE_IMAGE=<mirror>/library/python:3.12.11-slim-bookworm` (compose: `BASE_IMAGE=...`).
+    `no-new-privileges` could not be tested here (it breaks every container on the snap-Docker host); the setting stays in
+    the shipped compose file and DEPLOY.md documents the override. A bare container (no `init`) ignores a SIGTERM that
+    arrives before Python installs its handler (about the first 1-2 s: 137 after the grace period); compose sets
+    `init: true`, plain `docker run` needs `--init`. The system-level systemd units were never installed.
 12. **Universe oddities**: XAUT and USOON (non-crypto tokens) rank high by volume; their `SymbolRules` are derived
     conservatively, not read from the exchange. 15m bars with missing minutes are flagged, not repaired.
 13. `backtest/runner.py` still wraps exits in `TickExit`, a workaround from before the engine rounded stops itself.
     It is redundant but harmless; remove it only together with a re-run of the grid.
 14. Some commit trailers say `Claude Opus 5.5` (written by sub-agents); the others say `Claude Sonnet 5.5`.
-15. Recorder and history downloader have no CLI entry point.
+15. ~~No CLI for the recorder and history downloader~~ **Fixed**: `python -m wallexbot record` and `history`
+    (public GETs, host pinned, outside any order path, tested with fake clients and run in the image against the real
+    API). `deploy/run_recorder.py` was removed; compose and systemd call the CLI.
 
 ## Not done
 
@@ -98,7 +108,7 @@ private client against Wallex; any live run; the official competition rules (log
    on train/validation only, freeze parameters, then spend the test split exactly once.
 5. Verify `WallexBroker` against Wallex's Swagger and, only with explicit owner approval, a tiny-size live test; run
    `doctor` with a **read-only** key first. Never enable Withdraw.
-6. Housekeeping: CLI for recorder/history, package `config/` as data, decide on a type-checking policy (113 mypy findings).
+6. Housekeeping: decide on a type-checking policy (113 mypy findings).
 
 ## Verification history (why the safety claims are believable)
 

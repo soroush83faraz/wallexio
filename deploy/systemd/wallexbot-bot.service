@@ -52,7 +52,8 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources
+SystemCallFilter=~@privileged
+# not @resources: numpy/pandas (OpenBLAS thread setup) hit its syscalls and the process dies with SIGSYS
 MemoryMax=768M
 TasksMax=128
 

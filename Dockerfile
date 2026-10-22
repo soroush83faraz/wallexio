@@ -1,6 +1,9 @@
-# wallexbot, SHADOW mode only. Live trading does not exist in this build; no secrets are baked in.
+# wallexbot, SHADOW mode only (simulated fills on the public order book; no orders are ever sent).
 # The base tag is pinned; bump it deliberately (and re-run the tests) rather than floating.
-FROM python:3.12.11-slim-bookworm
+# Docker Hub is blocked on some networks: build through a registry mirror with
+#   docker build --build-arg BASE_IMAGE=<mirror>/library/python:3.12.11-slim-bookworm -t wallexbot:shadow .
+ARG BASE_IMAGE=python:3.12.11-slim-bookworm
+FROM ${BASE_IMAGE}
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -8,16 +11,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore
 
-WORKDIR /app
+# Regular (non-editable) install into site-packages; the default config ships inside the package
+# (wallexbot/default_config.yaml), so no source tree is needed at run time. The build tree is removed again.
+COPY pyproject.toml /build/pyproject.toml
+COPY src /build/src
+RUN pip install /build \
+    && rm -rf /build
 
-# Editable install on purpose: config.DEFAULT_PATH is resolved relative to the source tree
-# (<root>/config/default.yaml), and `guardian` has no --config flag, so the package must run from /app.
-COPY pyproject.toml ./
-COPY src ./src
-COPY config ./config
-COPY deploy/healthcheck.py deploy/run_recorder.py ./deploy/
-RUN pip install -e . \
-    && python -m compileall -q src deploy
+WORKDIR /app
+COPY deploy/healthcheck.py ./deploy/
 
 # Unprivileged user; /data is the only writable place (SQLite DB, shadow journal, recorder output).
 RUN groupadd --system --gid 10001 wallex \

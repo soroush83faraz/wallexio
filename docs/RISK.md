@@ -1,10 +1,10 @@
 # Risk
 
-Status: limits are defined in `config/default.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian (`guardian/monitor.py`, `flatten.py`, `main.py`) and the hard-breach flatten procedure are implemented and tested against `MockWallex` only (`tests/test_guardian_*.py`). They have never run against the real exchange. The bot loop (`bot/`, mock and shadow only) writes the strategy heartbeat each tick and runs the guardian in-process, on its own DB connection and the bot's own broker object (`--no-guardian` disables it).
+Status: limits are defined in `src/wallexbot/default_config.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian (`guardian/monitor.py`, `flatten.py`, `main.py`) and the hard-breach flatten procedure are implemented and tested against `MockWallex` only (`tests/test_guardian_*.py`). They have never run against the real exchange. The bot loop (`bot/`, mock and shadow only) writes the strategy heartbeat each tick and runs the guardian in-process, on its own DB connection and the bot's own broker object (`--no-guardian` disables it).
 
 ## Limits
 
-Values from `config/default.yaml`. Percentages are of equity; order value is in the quote currency (USDT).
+Values from `src/wallexbot/default_config.yaml`. Percentages are of equity; order value is in the quote currency (USDT).
 
 | Limit | Config key | Default | Notes |
 |---|---|---|---|

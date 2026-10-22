@@ -16,7 +16,7 @@ Modules (`backtest/`): `engine.py` (bar-by-bar simulator), `costs.py`, `metrics.
 
 `fetch_history(client, symbol, start_ts, end_ts, out_dir)` downloads closed 1m candles with public GETs only, walking backwards in 600-bar chunks (one request each) with a request budget (default 1500), retries and an abort after repeated failures. It is resumable: `state.json` records the bar ranges the API has already answered, so re-runs fetch only the rest and do not re-request true exchange gaps or the pre-listing region. `load_history(...)` reads the files back.
 
-Layout under the output directory (the repo uses `data/history/`, git-ignored via `/data/`): `<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv` (one file per UTC month, with a `.sha256` sidecar) plus `<SYMBOL>/state.json`. There is no CLI for the downloader yet. The 600-bar chunk is the client's `MAX_BARS_PER_REQUEST`; the "about 1500 bars" cap noted above is the observed server limit, not what the downloader uses.
+Layout under the output directory (the repo uses `data/history/`, git-ignored via `/data/`): `<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv` (one file per UTC month, with a `.sha256` sidecar) plus `<SYMBOL>/state.json`. The CLI is `python -m wallexbot history --out data/history --symbols A,B | --top-n N --days 45 --max-requests 1500` (one request budget shared across symbols; exit 1 when stopped early, re-run to resume). The 600-bar chunk is the client's `MAX_BARS_PER_REQUEST`; the "about 1500 bars" cap noted above is the observed server limit, not what the downloader uses.
 
 ## Engine assumptions (as implemented in `engine.py` and `costs.py`)
 

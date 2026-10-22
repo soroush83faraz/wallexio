@@ -1,6 +1,6 @@
 # Configuration and environment
 
-Status: `config.py`, `config/default.yaml` and `exchange/auth.py` exist. `wallexbot.doctor` now exists as a module (`run_doctor`, GET-only; see below), and `python -m wallexbot doctor` runs it. `cli.py` exists, but the `--arm-live` flag is deliberately refused everywhere (no live mode in this build).
+Status: `config.py`, `src/wallexbot/default_config.yaml` (package data) and `exchange/auth.py` exist. `wallexbot.doctor` now exists as a module (`run_doctor`, GET-only; see below), and `python -m wallexbot doctor` runs it. `cli.py` exists, but the `--arm-live` flag is deliberately refused everywhere (no live mode in this build).
 
 ## Environment variable names
 
@@ -12,11 +12,12 @@ Names only. Values never go in the repo. Local values belong in a git-ignored `.
 | `WALLEX_API_KEY_TRADE` | Read + Trade Wallex key | **Read** by `assert_live_armed()` in `exchange/auth.py`, which `load_config()` calls when `mode: live`. Presence and header-safe format are checked. `WallexBroker` (unverified) refuses to send or cancel unless built with this key and the token returned by `assert_live_armed()`; nothing builds one yet. |
 | `WALLEX_SUB_ACCOUNT_CLIENT_ID` | Sub-account identifier | Named in `exchange/auth.py` (`SUB_ACCOUNT_ENV`); optionally passed to the private client as a header. Not read by any loop yet. Use not specified in the plan. |
 | `WALLEX_ARM_LIVE` | Live arming | **Enforced** by `config.py` and `assert_live_armed()`: must equal `YES_I_UNDERSTAND` (exact match) when `mode: live`. |
+| `WALLEXBOT_CONFIG` | Config file override | Path to a YAML file used instead of the packaged default whenever no explicit path is passed (`load_config()`, `bot` without `--config`, `doctor`). Read from the process environment; empty = unset. Same fail-closed loader: secret-like keys, unknown mode, non-allow-listed host and the live-arming rules apply unchanged. A set but missing/unreadable/invalid file is a `ConfigError` (exit 2 for `bot`), never a silent fallback. Not a secret; a path only. |
 | `ANTHROPIC_API_KEY` | Optional AI advisor | Read only by `bot --advisor shadow` (`advisor_bridge.py`, via `redact.load_secret`); without it the bot warns and runs with `NullAdvisor`. Shadow verdicts are logged, never applied. |
 
 ## Config keys
 
-From `config/default.yaml`. Loaded by `load_config()`, which uses `os.environ` unless an `env` dict is passed.
+From `src/wallexbot/default_config.yaml`, shipped inside the wheel (a plain `pip install .` includes it; there is no second copy in the repo). Loaded by `load_config()`, which uses `os.environ` for the live-arming variables unless an `env` dict is passed. Resolution order of the file: explicit path argument (`bot --config`), then `WALLEXBOT_CONFIG`, then the packaged default. To customise, copy the file, edit it and point `WALLEXBOT_CONFIG` at the copy.
 
 | Key | Default | Meaning |
 |---|---|---|

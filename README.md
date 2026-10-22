@@ -20,7 +20,7 @@ This is a hackathon submission. It does not promise profit. "No trades" is a val
 Implemented and unit-tested (against the mock or synthetic data; nothing has run against the real exchange):
 
 - Public Wallex data client, unauthenticated GET only, host pinned (`exchange/wallex_public.py`); candle aggregation, cache, quality checks and a market-data recorder (`data/`).
-- Resumable historical 1m candle downloader (`data/history.py`), writing `data/history/<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv` (git-ignored). No CLI. `data/recorder.py::Recorder` appends depth and trades to `data/recorder/*.jsonl` (git-ignored); it has no CLI either, so it is started from a few lines of Python (docs/DEMO.md).
+- Resumable historical 1m candle downloader (`data/history.py`), writing `data/history/<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv` (git-ignored), run by `python -m wallexbot history --out DIR --symbols A,B | --top-n 12 --days 45 --max-requests 1500`. `data/recorder.py::Recorder` appends depth and trades to `data/recorder/*.jsonl` (git-ignored), run by `python -m wallexbot record --out DIR --symbols A,B | --top-n 12 --interval-s 15 [--max-cycles N]` (SIGTERM stops after the current cycle). Both are public GETs only, host-pinned and outside any order path (docs/DEMO.md).
 - Strategy: S1 momentum-breakout entry engine, S0 trend baseline, cooldown, risk-based sizing and exit policies E1-E4 (`strategy/`). Parameter defaults are unvalidated placeholders ([docs/STRATEGY.md](docs/STRATEGY.md)).
 - Backtest engine with cost model, metrics, chronological splits with a single-use test-set guard, sensitivity analysis and a report writer, plus the runner behind `python -m wallexbot backtest` (`backtest/`). Execution costs are calibrated from a small sample of recorded order books ([docs/COSTS.md](docs/COSTS.md), low confidence).
 - Append-only SQLite store (`store.py`), fail-closed risk engine and kill switch (`risk/`), the OMS, the only caller of `broker.submit_order` (`oms.py`). The risk decision and the intent's state change commit in one transaction (or not at all), and a SELL still being proposed counts as committed, so the bot's exit and the guardian's flatten never both sell one position; an intent left proposed by a store error (a failing COMMIT included) is resumed on the next poll (docs/RISK.md).
@@ -71,7 +71,7 @@ Run it (all offline except `bot --mode shadow`, which makes public GET requests 
 
 ## Safety defaults
 
-- `mode: mock` in `config/default.yaml`. Live mode is rejected unless `WALLEX_ARM_LIVE=YES_I_UNDERSTAND`, a `WALLEX_API_KEY_TRADE` and `cli_armed=True` in code are all present. The CLI refuses `--arm-live` and never passes `cli_armed`, so no command can reach live.
+- `mode: mock` in `src/wallexbot/default_config.yaml`. Live mode is rejected unless `WALLEX_ARM_LIVE=YES_I_UNDERSTAND`, a `WALLEX_API_KEY_TRADE` and `cli_armed=True` in code are all present. The CLI refuses `--arm-live` and never passes `cli_armed`, so no command can reach live.
 - Host allow-list: only `api.wallex.ir`.
 - Secrets live in a local `.env` (git-ignored). Only variable names are committed, in `.env.example`.
 - Wallex keys, when used, are read-only where possible. No key may hold withdrawal rights.
