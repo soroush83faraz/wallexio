@@ -114,7 +114,7 @@ def test_compose_has_no_ports_and_is_hardened(compose):
     assert not any(re.match(r"\s*(ports|expose):", ln) for ln in code_lines)
     for name, svc in compose["services"].items():
         assert "ports" not in svc and "expose" not in svc, name
-        assert svc["restart"] == "unless-stopped" and svc["read_only"] is True, name
+        assert svc["restart"] == "unless-stopped" and svc["read_only"] is True and svc["init"] is True, name
         assert "/tmp" in " ".join(svc["tmpfs"]), name
         assert "no-new-privileges:true" in svc["security_opt"], name
         assert svc["cap_drop"] == ["ALL"] and svc["mem_limit"] and svc["cpus"] and svc["pids_limit"], name
@@ -412,4 +412,11 @@ def test_recorder_is_started_through_the_cli_everywhere():
     assert compose["services"]["recorder"]["command"][:4] == ["python", "-m", "wallexbot", "record"]
     unit = (DEPLOY / "systemd" / "wallexbot-recorder.service").read_text()
     assert "-m wallexbot record --out /var/lib/wallexbot/recorder" in unit and "run_recorder" not in unit
+
+
+def test_systemd_syscall_filter_does_not_deny_resources():
+    """`~@resources` kills numpy/pandas (OpenBLAS thread setup) with SIGSYS at import: seen under systemd-run --user."""
+    for unit in UNITS:
+        filters = [ln for ln in unit.read_text().splitlines() if ln.startswith("SystemCallFilter=")]
+        assert filters and not any("@resources" in ln for ln in filters), unit.name
 

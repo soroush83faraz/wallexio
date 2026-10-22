@@ -15,6 +15,7 @@
 x-common: &common
   image: wallexbot:shadow
   restart: unless-stopped
+  init: true                    # tini as PID 1: a SIGTERM during interpreter start-up is not ignored (-> no 60 s hang)
   read_only: true
   tmpfs:
     - /tmp:size=16m,mode=1777
@@ -38,7 +39,10 @@ x-common: &common
 services:
   bot:
     <<: *common
-    build: .                     # the one image for both services
+    build:                       # the one image for both services
+      context: .
+      args:                      # behind a Docker Hub block: BASE_IMAGE=<mirror>/library/python:3.12.11-slim-bookworm
+        BASE_IMAGE: ${BASE_IMAGE:-python:3.12.11-slim-bookworm}
     container_name: wallexbot-bot
     command: ["python", "-m", "wallexbot", "bot", "--db", "/data/bot.db", "--mode", "shadow",
               "--balance", "1000", "--interval-s", "12"]

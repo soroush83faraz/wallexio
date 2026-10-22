@@ -52,7 +52,7 @@ guardian: $(PY)
 	$(PY) -m wallexbot guardian --db $(RUN_DIR)/demo_guardian.db --mode mock --demo-db --ticks 3 --interval 1
 
 docker-build:
-	docker build -t $(IMAGE) .
+	docker build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -t $(IMAGE) .
 
 docker-up:
 	docker compose up -d --build

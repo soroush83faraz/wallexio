@@ -193,3 +193,32 @@ def test_history_aborts_on_repeated_failures_without_raising(tmp_path):
             raise WallexHTTPError("down")
 
     assert _history(tmp_path, "--symbols", "BTCUSDT", "--days", "1", client=Down()) == 1
+
+
+def test_record_sigterm_before_the_first_cycle_exits_zero_without_recording(tmp_path):
+    """PID 1 in a container ignores signals without a handler: they must be installed before the universe GET."""
+    class SlowRank(FakePublic):
+        def rank_universe(self, quote, top_n):
+            os.kill(os.getpid(), signal.SIGTERM)
+            return super().rank_universe(quote, top_n)
+
+    fake = SlowRank()
+    assert collect.run_record(_args("record", "--out", str(tmp_path), "--top-n", "2"), client=fake) == 0
+    assert [c for c in fake.calls if c[0] in ("depth", "trades")] == []
+
+
+def test_history_sigterm_saves_progress_and_exits_one(tmp_path, capsys):
+    class Term(FakePublic):
+        def candles(self, symbol, resolution, start, end):
+            if len([c for c in self.calls if c[0] == "candles"]) == 1:
+                os.kill(os.getpid(), signal.SIGTERM)          # arrives while the second chunk is requested
+            return super().candles(symbol, resolution, start, end)
+
+    fake = Term()
+    assert _history(tmp_path, "--symbols", "BTCUSDT", "--days", "1", client=fake) == 1
+    assert "interrupted; progress saved" in capsys.readouterr().err
+    last_closed = NOW // 60 * 60 - 60
+    assert load_history(tmp_path, "BTCUSDT", last_closed - 86_400, last_closed)       # the finished chunk is on disk
+    resume = FakePublic()
+    assert _history(tmp_path, "--symbols", "BTCUSDT", "--days", "1", client=resume) == 0
+    assert 1 <= len(resume.calls) <= 2                                                # only the missing chunks

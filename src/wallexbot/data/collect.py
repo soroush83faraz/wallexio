@@ -10,6 +10,7 @@ import logging
 import re
 import signal
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -79,25 +80,38 @@ def _signals(on_signal: Callable[[int], None]) -> Iterator[None]:
 
 
 def run_record(args, *, client=None) -> int:
-    """Recorder loop; SIGTERM/SIGINT finish the current cycle, then exit 0."""
-    try:
-        if args.interval_s < 1:
-            raise UsageError("--interval-s must be >= 1")
-        if args.max_cycles is not None and args.max_cycles < 1:
-            raise UsageError("--max-cycles must be >= 1")
-        client = _public_client(client)
-        symbols = resolve_symbols(client, args.symbols, args.top_n)
-    except UsageError as e:
-        print(f"refused: {e}", file=sys.stderr)
-        return 2
-    except Exception as e:  # noqa: BLE001 - network/universe failure before the first cycle
-        print(f"record: cannot resolve the symbol universe: {e}", file=sys.stderr)
-        return 1
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    from wallexbot.data.recorder import Recorder
-    rec = Recorder(client, symbols, args.out, interval_s=args.interval_s)
-    print(f"recorder: {len(symbols)} symbols {','.join(symbols)} -> {args.out} every {args.interval_s:g}s", flush=True)
-    with _signals(lambda _n: rec.stop()):
+    """Recorder loop; SIGTERM/SIGINT finish the current cycle, then exit 0. The handlers are installed before
+    anything else: as PID 1 in a container an early SIGTERM would otherwise be ignored (-> SIGKILL after the grace)."""
+    stop = threading.Event()
+    holder: list = []
+
+    def on_signal(_n: int) -> None:
+        stop.set()
+        for rec in holder:
+            rec.stop()
+
+    with _signals(on_signal):
+        try:
+            if args.interval_s < 1:
+                raise UsageError("--interval-s must be >= 1")
+            if args.max_cycles is not None and args.max_cycles < 1:
+                raise UsageError("--max-cycles must be >= 1")
+            client = _public_client(client)
+            symbols = resolve_symbols(client, args.symbols, args.top_n)
+        except UsageError as e:
+            print(f"refused: {e}", file=sys.stderr)
+            return 2
+        except Exception as e:  # noqa: BLE001 - network/universe failure before the first cycle
+            print(f"record: cannot resolve the symbol universe: {e}", file=sys.stderr)
+            return 1
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+        from wallexbot.data.recorder import Recorder
+        rec = Recorder(client, symbols, args.out, interval_s=args.interval_s)
+        holder.append(rec)
+        if stop.is_set():
+            rec.stop()
+        print(f"recorder: {len(symbols)} symbols {','.join(symbols)} -> {args.out} every {args.interval_s:g}s",
+              flush=True)
         rec.run_forever(handle_signals=False, max_cycles=args.max_cycles)
     print(f"recorder stopped: {rec.stats}", flush=True)
     return 0
@@ -109,32 +123,32 @@ def run_history(args, *, client=None, clock: Callable[[], float] = time.time,
     Exit 0 = every symbol finished; 1 = stopped early (budget, repeated failures, signal) or a symbol failed:
     progress is on disk, run the same command again."""
     from wallexbot.data.history import HistoryError, RequestBudget, fetch_history
-    try:
-        if not 1 <= args.days <= 3650:
-            raise UsageError("--days must be between 1 and 3650")
-        if args.max_requests < 1:
-            raise UsageError("--max-requests must be >= 1")
-        client = _public_client(client)
-        symbols = resolve_symbols(client, args.symbols, args.top_n)
-    except UsageError as e:
-        print(f"refused: {e}", file=sys.stderr)
-        return 2
-    except Exception as e:  # noqa: BLE001
-        print(f"history: cannot resolve the symbol universe: {e}", file=sys.stderr)
-        return 1
-    end = int(clock())
-    start = end - args.days * DAY_S
-    budget = RequestBudget(args.max_requests)
-    Path(args.out).mkdir(parents=True, exist_ok=True)
-    print(f"history: {len(symbols)} symbols, last {args.days} d, budget {args.max_requests} requests -> {args.out}",
-          flush=True)
 
     def _interrupt(_n: int) -> None:
         raise KeyboardInterrupt          # unwinds through fetch_history's `finally`, which checkpoints to disk
 
     rc = 0
+    budget = RequestBudget(max(args.max_requests, 1))
     try:
-        with _signals(_interrupt):
+        with _signals(_interrupt):       # installed first: as PID 1 an early SIGTERM would otherwise be ignored
+            try:
+                if not 1 <= args.days <= 3650:
+                    raise UsageError("--days must be between 1 and 3650")
+                if args.max_requests < 1:
+                    raise UsageError("--max-requests must be >= 1")
+                client = _public_client(client)
+                symbols = resolve_symbols(client, args.symbols, args.top_n)
+            except UsageError as e:
+                print(f"refused: {e}", file=sys.stderr)
+                return 2
+            except Exception as e:  # noqa: BLE001
+                print(f"history: cannot resolve the symbol universe: {e}", file=sys.stderr)
+                return 1
+            end = int(clock())
+            start = end - args.days * DAY_S
+            Path(args.out).mkdir(parents=True, exist_ok=True)
+            print(f"history: {len(symbols)} symbols, last {args.days} d, budget {args.max_requests} requests "
+                  f"-> {args.out}", flush=True)
             for sym in symbols:
                 if budget.remaining <= 0:
                     print(f"  {sym}: skipped, request budget exhausted (re-run to resume)", flush=True)
@@ -154,6 +168,6 @@ def run_history(args, *, client=None, clock: Callable[[], float] = time.time,
     except KeyboardInterrupt:
         print("history: interrupted; progress saved, re-run the same command to resume", file=sys.stderr, flush=True)
         return 1
-    print(f"history done: {budget.used}/{budget.limit} requests used" + ("" if rc == 0 else " (incomplete: re-run to resume)"),
-          flush=True)
+    print(f"history done: {budget.used}/{budget.limit} requests used"
+          + ("" if rc == 0 else " (incomplete: re-run to resume)"), flush=True)
     return rc
