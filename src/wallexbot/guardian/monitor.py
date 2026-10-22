@@ -27,6 +27,8 @@ One tick:
      no fresh quote for > max_data_age_s                     -> condition stale_feed:<symbols>, no
        kill switch (entries on a stale quote are already refused by the bot and the risk engine)
      no fresh quote for > stale_action_after_s (120 s), held -> per config: hold, or flatten
+       (both: a guardian.alert error row, repeated every 5 min while it lasts, and the symbols in
+       the tick audit event's "held_stale"; deploy/healthcheck.py fails on either)
      (a quote dated > max_quote_future_skew_s after the clock is invalid, never fresh; freshness
      is clamped to now, so a bogus future timestamp or a backward clock step cannot mask a
      frozen feed)
@@ -35,7 +37,9 @@ One tick:
    Kill switch release. Every engagement stays until an operator disengages it, EXCEPT the
    guardian's own transient one (reason 'auto:...', actor 'guardian', still the latest row): the
    guardian releases that after auto_release_clear_ticks (3) consecutive clear ticks spanning at
-   least auto_release_clear_s (60 s), as an audited 'release_kill_switch' event. A latching
+   least auto_release_clear_s (60 s) of wall-clock AND monotonic time, as an audited
+   'release_kill_switch' event. The release is a compare-and-set in one IMMEDIATE store
+   transaction: only the row id the clear streak observed, still the latest, is released. A latching
    condition seen while only a transient engagement holds the switch writes a new, latching row
    on top (KillSwitch.engage_unless_held), so it can never be auto-released.
 5. Every decision is appended to audit_events with actor='guardian' (and kill-switch rows carry
@@ -59,6 +63,8 @@ from wallexbot.types import IntentState, Side
 _ZERO = Decimal(0)
 _HUNDRED = Decimal(100)
 _IN_FLIGHT = frozenset({IntentState.PROPOSED, IntentState.RISK_APPROVED})
+STALE_ALERT_EVERY_S = 300.0     # held / ordered symbol without a fresh quote: re-alert this often
+STALE_ACTIONS = ("hold", "flatten")
 # Kill-switch conditions. LATCHING ones stay engaged until an operator disengages the switch;
 # TRANSIENT ones are engaged with an 'auto:' reason that the guardian itself releases once clear.
 LATCHING_CONDITIONS = frozenset({"balance_mismatch", "breach_eval_error", "daily_loss_soft", "drawdown_soft",
@@ -92,7 +98,7 @@ class GuardianConfig:
     flatten: FlattenConfig = field(default_factory=FlattenConfig)
 
     def __post_init__(self) -> None:
-        if self.stale_action not in ("hold", "flatten"):
+        if self.stale_action not in STALE_ACTIONS:
             raise ValueError(f"stale_action must be 'hold' or 'flatten', not {self.stale_action!r}")
         if not self.max_quote_future_skew_s >= 0:
             raise ValueError("max_quote_future_skew_s must be >= 0")
@@ -113,14 +119,18 @@ class Guardian:
     def __init__(self, store, broker, risk, killswitch, oms, config: GuardianConfig | None = None,
                  clock: Callable[[], float] = time.time, *, sleep: Callable[[float], Any] = time.sleep,
                  depth_fn: Callable[[str], Sequence] | None = None,
-                 universe: Callable[[], Iterable[str]] | None = None) -> None:
+                 universe: Callable[[], Iterable[str]] | None = None,
+                 monotonic: Callable[[], float] | None = None) -> None:
         """`universe`: symbols to quote and watch besides every symbol held (ledger or exchange
         balance). None = every symbol in the risk rules. The in-process guardian passes the bot's
-        trading universe, so it does not quote hundreds of markets the bot never trades."""
+        trading universe, so it does not quote hundreds of markets the bot never trades.
+        `monotonic`: the clock the auto-release window must ALSO have elapsed on (default
+        time.monotonic; a simulated run passes its simulated clock)."""
         self.store, self.broker, self.risk, self.ks, self.oms = store, broker, risk, killswitch, oms
         self.universe = universe
         self.cfg = config or GuardianConfig()
         self.clock, self.sleep, self.depth_fn = clock, sleep, depth_fn
+        self.monotonic = monotonic or time.monotonic
         self.quote_ccy = self.cfg.quote_currency or risk.config.quote_currency
         self.max_age = float(self.cfg.max_data_age_s if self.cfg.max_data_age_s is not None
                              else risk.config.max_data_age_s)
@@ -131,8 +141,12 @@ class Guardian:
         self._mismatch_streak: dict[str, int] = {}
         self._reviewed: frozenset[str] = frozenset()
         self._last_logged: tuple | None = None
+        self._clear_row: int | None = None
         self._clear_ticks = 0
         self._clear_since: float | None = None
+        self._clear_mono: float | None = None
+        self._stale_alert: tuple[float, frozenset[str]] | None = None
+        self._last_quote: dict[str, Any] = {}       # last valid quote per symbol (flatten fallback)
 
     # ------------------------------------------------------------------ public
     def tick(self) -> TickReport:
@@ -164,6 +178,10 @@ class Guardian:
         stale = [s for s, a in ages.items() if a > self.max_age]
         if stale:
             rep.conditions.append("stale_feed:" + ",".join(stale))
+        # Exposed (held or ordered) and without a fresh quote past stale_action_after_s: whatever
+        # the stale_action, this is never silent (a repeated guardian.alert row + the tick audit).
+        held_stale = {s: a for s, a in ages.items() if a > self.cfg.stale_action_after_s}
+        self._held_stale_alert(now, held_stale)
 
         equity, unmarked = self._equity(balances, quotes, positions)
         rep.equity = equity
@@ -228,10 +246,11 @@ class Guardian:
             else:
                 rep.conditions.append("stale_hold")
 
-        key = (tuple(rep.conditions), tuple(rep.actions))
+        key = (tuple(rep.conditions), tuple(rep.actions), tuple(sorted(held_stale)))
         if rep.actions or key != self._last_logged:
             self._audit("tick", {"equity": equity, "sod": sod, "hwm": hwm,
                                  "feed_age_s": None if feed_age is None else round(feed_age, 3),
+                                 "held_stale": sorted(held_stale), "stale_action": self.cfg.stale_action,
                                  "conditions": rep.conditions, "actions": rep.actions,
                                  "flat": None if rep.flatten is None else rep.flatten.flat,
                                  "needs_review": None if rep.flatten is None else rep.flatten.needs_review}, now)
@@ -242,31 +261,68 @@ class Guardian:
     def _auto_release(self, now: float, rep: TickReport, condition_present: bool) -> None:
         """Release the kill switch ONLY when its latest row is the guardian's own transient
         ('auto:') engagement and no freezing condition has been seen for auto_release_clear_ticks
-        consecutive ticks spanning at least auto_release_clear_s. Anything else (operator, bot,
-        latching guardian reasons, a row written after ours) is never touched. Audited."""
-        if condition_present or not self.ks.held_by_transient():
-            self._clear_ticks, self._clear_since = 0, None
+        consecutive ticks spanning at least auto_release_clear_s of BOTH wall-clock and monotonic
+        time (a forward wall-clock jump cannot shorten the window; a backward step restarts it).
+        The clear streak belongs to one observed row id: a different latest row restarts it. The
+        release is a compare-and-set in one store transaction (KillSwitch.release_transient): if
+        the latest row is no longer the observed one (an operator / bot row written meanwhile by
+        any connection), nothing is written and the streak resets. Audited."""
+        ev = None if condition_present else self.ks.latest_transient()
+        if ev is None:
+            self._reset_clear()
             return
-        if self._clear_since is None or not self._clear_since <= now:   # first clear tick / clock stepped back
-            self._clear_ticks, self._clear_since = 0, now
+        mono = float(self.monotonic())
+        if (self._clear_row != ev.id or self._clear_since is None or not self._clear_since <= now
+                or not self._clear_mono <= mono):          # new row / first clear tick / clock stepped back
+            self._clear_row, self._clear_ticks, self._clear_since, self._clear_mono = ev.id, 0, now, mono
         self._clear_ticks += 1
-        clear_s = now - self._clear_since
-        if self._clear_ticks < self.cfg.auto_release_clear_ticks or clear_s < self.cfg.auto_release_clear_s:
+        clear_s, clear_mono_s = now - self._clear_since, mono - self._clear_mono
+        floor = self.cfg.auto_release_clear_s
+        if self._clear_ticks < self.cfg.auto_release_clear_ticks or clear_s < floor or clear_mono_s < floor:
             return
-        released = self.store.latest_killswitch().reason
-        self.ks.disengage(f"guardian auto-release: '{released}' clear for {self._clear_ticks} ticks / "
-                          f"{int(clear_s)}s", actor=ACTOR, ts=now)
+        released = ev.reason
+        if not self.ks.release_transient(ev.id, f"guardian auto-release: '{released}' clear for "
+                                         f"{self._clear_ticks} ticks / {int(clear_s)}s", actor=ACTOR, ts=now):
+            self._audit("release_kill_switch_refused", {"observed": released, "observed_id": ev.id,
+                                                        "why": "latest kill-switch row changed"}, now)
+            log.warning("guardian: auto-release refused: the latest kill-switch row is no longer %r", released)
+            self._reset_clear()
+            return
         rep.actions.append("release_kill_switch")
         self._audit("release_kill_switch", {"released": released, "clear_ticks": self._clear_ticks,
-                                            "clear_s": round(clear_s, 3)}, now)
+                                            "clear_s": round(clear_s, 3), "clear_mono_s": round(clear_mono_s, 3)},
+                    now)
         log.warning("guardian: kill switch auto-released (%s clear for %d ticks / %ds)", released,
                     self._clear_ticks, int(clear_s))
-        self._clear_ticks, self._clear_since = 0, None
+        self._reset_clear()
+
+    def _held_stale_alert(self, now: float, stale: dict[str, float]) -> None:
+        """A guardian.alert error row when a held / ordered symbol first goes without a fresh quote
+        for > stale_action_after_s, again when a symbol joins, and every STALE_ALERT_EVERY_S while
+        it persists (so a 15-minute alert window, deploy/healthcheck.py, stays red)."""
+        if not stale:
+            self._stale_alert = None
+            return
+        last = self._stale_alert
+        if last is not None and frozenset(stale) <= last[1] and 0 <= now - last[0] < STALE_ALERT_EVERY_S:
+            return
+        self._stale_alert = (now, frozenset(stale))
+        syms = ",".join(sorted(stale))
+        age = max(stale.values())
+        self._error("guardian.alert", f"no fresh quote for held/ordered {syms} for {int(age)}s "
+                    f"(> {int(self.cfg.stale_action_after_s)}s); stale_action={self.cfg.stale_action}", now,
+                    {"what": "held_feed_stale", "age_s": {s: round(a, 1) for s, a in sorted(stale.items())},
+                     "stale_action": self.cfg.stale_action})
+        log.error("guardian: no fresh quote for held/ordered %s for %ds (stale_action=%s)", syms, int(age),
+                  self.cfg.stale_action)
+
+    def _reset_clear(self) -> None:
+        self._clear_row, self._clear_ticks, self._clear_since, self._clear_mono = None, 0, None, None
 
     def _flatten(self, cause: str, hard: bool, reason: str, account: AccountState | None) -> FlattenResult:
         return flatten_all(self.store, self.broker, self.oms, self.ks, cause=cause, hard=hard,
                            config=self.cfg.flatten, clock=self.clock, sleep=self.sleep, account=account,
-                           reason=reason, depth_fn=self.depth_fn)
+                           reason=reason, depth_fn=self.depth_fn, last_quotes=dict(self._last_quote))
 
     def _watch_symbols(self, balances, positions, now: float) -> list[str]:
         rules = self.risk.rules
@@ -320,6 +376,7 @@ class Guardian:
             out[sym] = q
             if q.bid > 0 and q.ask >= q.bid:
                 self._last_fresh[sym] = max(self._last_fresh.get(sym, float("-inf")), min(ts, now))
+                self._last_quote[sym] = q
         return out, future
 
     def _equity(self, balances, quotes, positions) -> tuple[Decimal, list[str]]:

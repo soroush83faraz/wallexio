@@ -10,6 +10,7 @@ switch for entries. A separate guardian PROCESS only makes sense against a real 
 
 run_guardian() is the standalone loop. Its CLI is a DEMO only (no network, no credentials):
     python -m wallexbot.guardian.main --db NEW.db --mode mock --demo-db [--ticks N] [--interval S]
+        [--stale-action hold|flatten]
 It wires its OWN in-memory MockWallex (10000 USDT); --mode shadow is the same mock with flatten
 dry-run. It refuses to run without --demo-db, and on any database that holds bot data (audit
 events by 'bot'/'strategy') or equity / audit rows it did not write itself: its equity rows
@@ -35,7 +36,7 @@ from urllib.parse import quote as _urlquote
 
 from wallexbot.config import Config, load_config
 from wallexbot.guardian.flatten import ACTOR, FlattenConfig, recover_guardian_intents
-from wallexbot.guardian.monitor import Guardian, GuardianConfig, TickReport
+from wallexbot.guardian.monitor import STALE_ACTIONS, Guardian, GuardianConfig, TickReport
 from wallexbot.oms import OMS
 from wallexbot.risk.engine import RiskEngine
 from wallexbot.risk.killswitch import KillSwitch
@@ -78,12 +79,13 @@ def build_guardian(store: Store, broker, rules: Mapping[str, SymbolRules], confi
                    gconfig: GuardianConfig | None = None, *, clock: Callable[[], float] = time.time,
                    sleep: Callable[[float], Any] = time.sleep,
                    depth_fn: Callable[[str], Sequence] | None = None,
-                   universe: Callable[[], Iterable[str]] | None = None) -> Guardian:
+                   universe: Callable[[], Iterable[str]] | None = None,
+                   monotonic: Callable[[], float] | None = None) -> Guardian:
     ks = KillSwitch(store)
     risk = RiskEngine(config, rules, ks)
     oms = OMS(store, broker, risk, ks, clock=clock)  # default approval: risk-approved only
     return Guardian(store, broker, risk, ks, oms, gconfig, clock, sleep=sleep, depth_fn=depth_fn,
-                    universe=universe)
+                    universe=universe, monotonic=monotonic)
 
 
 class InProcessGuardian:
@@ -95,7 +97,8 @@ class InProcessGuardian:
     def __init__(self, db_path: str | Path, broker, rules: Mapping[str, SymbolRules], config: Config,
                  gconfig: GuardianConfig | None = None, *, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], Any] = time.sleep, interval_s: float = DEFAULT_INTERVAL_S,
-                 universe: Callable[[], Iterable[str]] | None = None, max_consecutive_failures: int = 3) -> None:
+                 universe: Callable[[], Iterable[str]] | None = None, max_consecutive_failures: int = 3,
+                 monotonic: Callable[[], float] | None = None) -> None:
         if str(db_path) == ":memory:":
             raise ValueError("the in-process guardian needs a database file (a second :memory: connection "
                              "is a different, empty database)")
@@ -104,7 +107,7 @@ class InProcessGuardian:
         self.clock, self.interval_s, self.max_failures = clock, float(interval_s), max_consecutive_failures
         self.store = Store(db_path, clock=clock)
         self.guardian = build_guardian(self.store, broker, rules, config, gconfig, clock=clock, sleep=sleep,
-                                       universe=universe)
+                                       universe=universe, monotonic=monotonic)
         self.ticks = self.failed_ticks = self.consecutive_failures = 0
         self.last_report: TickReport | None = None
         self._last: float | None = None
@@ -276,6 +279,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                    help="confirm that --db is a throwaway demo database (refused if it holds bot data)")
     p.add_argument("--ticks", type=int, default=None, help="stop after N ticks (default: until signal)")
     p.add_argument("--interval", type=float, default=5.0, help="seconds between ticks")
+    p.add_argument("--stale-action", choices=STALE_ACTIONS, default="hold",
+                   help="held position with no fresh quote for > 120 s: hold (default; alert every 5 min) or "
+                        "flatten (reduce-only exits)")
     args = p.parse_args(argv)
     if args.mode not in ALLOWED_MODES:
         print(f"refused: guardian mode {args.mode!r} is not allowed (only {', '.join(ALLOWED_MODES)})",
@@ -294,7 +300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     clock = time.time
     broker, rules = build_mock_broker(cfg, clock)
     sym = next(iter(rules))
-    gcfg = GuardianConfig(flatten=FlattenConfig(dry_run=args.mode == "shadow"))
+    gcfg = GuardianConfig(flatten=FlattenConfig(dry_run=args.mode == "shadow"), stale_action=args.stale_action)
     stop = StopFlag()
     previous = {}
     if threading.current_thread() is threading.main_thread():

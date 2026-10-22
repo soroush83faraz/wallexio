@@ -195,10 +195,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("guardian", add_help=False,
                    help="standalone guardian DEMO (own mock broker, new DB only); all further arguments go to "
-                        "`python -m wallexbot.guardian.main` (--db NEW.db --mode mock|shadow --demo-db [--ticks N])")
+                        "`python -m wallexbot.guardian.main` (--db NEW.db --mode mock|shadow --demo-db [--ticks N] "
+                        "[--stale-action hold|flatten])")
     sub.add_parser("bot", add_help=False,
                    help="autonomous loop, mock|shadow only (--db PATH --mode mock|shadow [--replay-from DIR] "
                         "[--max-ticks N] [--balance USDT] [--profile strict|demo] [--no-guardian] "
+                        "[--stale-action hold|flatten] "
                         "[--advisor off|shadow]); live is refused")
     return p
 

@@ -7,6 +7,7 @@ at least 60 s, the guardian disengages it (actor 'guardian', audited 'release_ki
 other engagement (operator, bot, latching guardian reasons, tick failures, flatten), or one written
 after the guardian's, is never released by the guardian.
 """
+import sqlite3
 from decimal import Decimal
 
 import pytest
@@ -32,8 +33,9 @@ def gstore(rig):
 
 @pytest.fixture
 def g(rig, gstore):
+    # The simulated clock is the monotonic clock too (no wall-clock jumps unless a test makes one).
     return build_guardian(gstore, rig.broker, rig.rules, rig.cfg, GuardianConfig(heartbeat_timeout_s=60),
-                          clock=rig.clock, sleep=rig.clock.advance)
+                          clock=rig.clock, sleep=rig.clock.advance, monotonic=rig.clock)
 
 
 def step(rig, g, seconds=15, alive=True):
@@ -176,7 +178,7 @@ def test_backward_clock_step_restarts_the_clear_window(rig, g):
 def test_guardian_restart_keeps_a_transient_engagement_releasable(rig, gstore, g):
     lose_heartbeat(rig, g)
     g2 = build_guardian(gstore, rig.broker, rig.rules, rig.cfg, GuardianConfig(), clock=rig.clock,
-                        sleep=rig.clock.advance)
+                        sleep=rig.clock.advance, monotonic=rig.clock)
     for _ in range(4):
         assert "release_kill_switch" not in step(rig, g2, 15).actions
     assert "release_kill_switch" in step(rig, g2, 15).actions
@@ -200,3 +202,105 @@ def test_inprocess_tick_failure_engagement_is_not_transient(rig):
 def test_release_thresholds_cannot_be_weakened(kw):
     with pytest.raises(ValueError):
         GuardianConfig(**kw)
+
+
+# ---------------------------------------------------------------------------- v6: TOCTOU and clocks
+def test_operator_row_written_between_check_and_release_is_never_released(rig, gstore, g):
+    """Verifier v6/test_b.py: the transient check, the reason read and the disengage were separate
+    statements, so an operator row written by ANOTHER connection right after the guardian's check
+    was released by the guardian. The release is now a compare-and-set on the observed row id
+    inside one IMMEDIATE transaction."""
+    lose_heartbeat(rig, g)
+    for _ in range(4):
+        step(rig, g, 15)
+    op = sqlite3.connect(rig.store.path, timeout=5)
+    real = g.ks.latest_transient
+
+    def check_then_operator_writes():
+        ev = real()
+        if ev is not None:            # forced interleaving: right after the guardian looked
+            op.execute("INSERT INTO killswitch_events(ts, engaged, reason, actor) VALUES "
+                       "(?, 1, 'operator: manual stop', 'operator')", (rig.clock(),))
+            op.commit()
+        return ev
+    g.ks.latest_transient = check_then_operator_writes
+    rep = step(rig, g, 15)                                # the tick that would have released
+    op.close()
+    ev = rig.store.latest_killswitch()
+    assert "release_kill_switch" not in rep.actions
+    assert ev.engaged and ev.actor == "operator" and ev.reason == "operator: manual stop"
+    assert not releases(gstore)
+    (refused,) = gstore.audit_events("guardian", "release_kill_switch_refused")
+    assert refused["payload"]["observed"] == "auto:heartbeat_lost"
+    g.ks.latest_transient = real
+    for _ in range(10):                                   # and never later either
+        assert "release_kill_switch" not in step(rig, g, 15).actions
+    assert rig.store.latest_killswitch().actor == "operator"
+
+
+def test_compare_and_set_release_checks_row_id_actor_and_reason(rig):
+    ks = KillSwitch(rig.store)
+    ks.engage("auto:heartbeat_lost", actor="guardian", ts=rig.clock())
+    first = rig.store.latest_killswitch()
+    ks.engage("auto:heartbeat_lost", actor="guardian", ts=rig.clock())     # a newer row
+    assert not ks.release_transient(first.id, "stale id", ts=rig.clock())
+    assert rig.store.latest_killswitch().engaged
+    for actor in ("operator", "bot"):                                      # forged 'auto:' reasons
+        ks.engage("auto:heartbeat_lost", actor=actor, ts=rig.clock())
+        assert not ks.release_transient(rig.store.latest_killswitch().id, "forged", ts=rig.clock())
+        assert rig.store.latest_killswitch().engaged
+    ks.engage("auto:heartbeat_lost", actor="guardian", ts=rig.clock())
+    assert ks.release_transient(rig.store.latest_killswitch().id, "ok", ts=rig.clock())
+    assert rig.store.latest_killswitch().engaged is False
+
+
+@pytest.mark.parametrize("actor", ["operator", "bot"])
+def test_forged_auto_reason_by_operator_or_bot_is_never_released(rig, g, actor):
+    step(rig, g, 1)
+    KillSwitch(rig.store).engage("auto:heartbeat_lost", actor=actor, ts=rig.clock())
+    for _ in range(20):
+        assert "release_kill_switch" not in step(rig, g, 15).actions
+    ev = rig.store.latest_killswitch()
+    assert ev.engaged and ev.actor == actor
+
+
+class Mono:
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def test_forward_wall_clock_jump_does_not_shorten_the_clear_window(rig, gstore):
+    """Verifier v6: ticks +1 s, +1 s, then a +300 s wall-clock jump released the switch after ~2
+    real seconds. The 60 s floor now holds on the monotonic clock as well."""
+    mono = Mono()
+    g = build_guardian(gstore, rig.broker, rig.rules, rig.cfg, GuardianConfig(heartbeat_timeout_s=60),
+                       clock=rig.clock, sleep=rig.clock.advance, monotonic=mono)
+
+    def tick(wall, real, alive=True):
+        mono.t += real
+        return step(rig, g, wall, alive)
+    tick(1, 1)
+    for _ in range(5):
+        tick(15, 15, alive=False)
+    assert rig.ks.held_by_transient()
+    out = [("release_kill_switch" in tick(w, r).actions) for w, r in ((1, 1), (1, 1), (300, 1), (1, 1))]
+    assert out == [False, False, False, False] and rig.ks.is_engaged()
+    for _ in range(3):                                    # 4 + 45 = 49 s of monotonic time: still held
+        assert "release_kill_switch" not in tick(15, 15).actions
+    assert "release_kill_switch" in tick(15, 15).actions  # 64 s monotonic, > 60 s wall: released
+    (audit,) = releases(gstore)
+    assert float(audit["payload"]["clear_mono_s"]) >= 60
+
+
+def test_default_monotonic_is_real_time(rig, gstore):
+    """Without an injected monotonic clock the guardian uses time.monotonic: simulated wall-clock
+    seconds alone can never satisfy the 60 s floor."""
+    g = build_guardian(gstore, rig.broker, rig.rules, rig.cfg, GuardianConfig(heartbeat_timeout_s=60),
+                       clock=rig.clock, sleep=rig.clock.advance)
+    lose_heartbeat(rig, g)
+    for _ in range(10):
+        assert "release_kill_switch" not in step(rig, g, 300).actions
+    assert rig.ks.is_engaged()

@@ -13,6 +13,8 @@ Steps, in order:
    exchange balance, capped by the OMS ledger (the OMS cannot sell what its ledger does not hold).
 4. Poll until flat, or until `max_failed_attempts` failed exits, then record needs_review and an
    operator alert (an `errors` row with source guardian.alert, plus the returned status).
+   No quote (broker.quote raises): the exit is priced from the top of the broker's order book, else
+   from the guardian's last valid quote; with neither, the attempt fails (-> needs_review + alert).
 
 Invariants (why this can never double-sell or run away):
 - No resubmission. A new exit is placed only when every reduce-only SELL intent for the symbol
@@ -50,13 +52,13 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.oms import OPEN_INTENT_STATES, is_young_proposed
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.store import IntentRecord
-from wallexbot.types import (TERMINAL_STATES, IntentState, OrderIntent, OrderType, Side, SymbolRules,
+from wallexbot.types import (TERMINAL_STATES, IntentState, OrderIntent, OrderType, Quote, Side, SymbolRules,
                              round_down)
 
 S = IntentState
@@ -156,15 +158,19 @@ def recover_guardian_intents(store, now: float) -> list[str]:
 def flatten_all(store, broker, oms, killswitch, *, cause: str, hard: bool,
                 config: FlattenConfig = FlattenConfig(), clock: Callable[[], float] = time.time,
                 sleep: Callable[[float], Any] = time.sleep, account: AccountState | None = None,
-                reason: str = "", depth_fn: Callable[[str], Sequence] | None = None) -> FlattenResult:
-    """Run one flatten episode pass. `cause` names the episode (e.g. "hard", "stale", "operator")."""
+                reason: str = "", depth_fn: Callable[[str], Sequence] | None = None,
+                last_quotes: Mapping[str, Quote] | None = None) -> FlattenResult:
+    """Run one flatten episode pass. `cause` names the episode (e.g. "hard", "stale", "operator").
+    `last_quotes`: the caller's last valid quote per symbol, used only when broker.quote() raises
+    and the broker's order book is unavailable too."""
     return _Flattener(store, broker, oms, killswitch, cause=cause, hard=hard, config=config, clock=clock,
-                      sleep=sleep, account=account, reason=reason, depth_fn=depth_fn).run()
+                      sleep=sleep, account=account, reason=reason, depth_fn=depth_fn,
+                      last_quotes=last_quotes).run()
 
 
 class _Flattener:
     def __init__(self, store, broker, oms, killswitch, *, cause, hard, config, clock, sleep, account,
-                 reason, depth_fn) -> None:
+                 reason, depth_fn, last_quotes=None) -> None:
         self.store, self.broker, self.oms, self.ks = store, broker, oms, killswitch
         self.cfg: FlattenConfig = config
         self.clock, self._sleep_fn = clock, sleep
@@ -175,6 +181,7 @@ class _Flattener:
         self.account = account or AccountState(_ZERO, _ZERO, _ZERO, utc_day(now), _ZERO)
         self.depth_fn = depth_fn or (lambda sym: broker.depth(sym).bids)
         self.alerts: list[str] = []
+        self.last_quotes: dict[str, Quote] = dict(last_quotes or {})
         # Unresolved ambiguous submits must be allowed to reach the OMS not-found grace period.
         grace = float(oms.not_found_grace_s)
         self.unknown_timeout = max(config.unknown_timeout_s, grace + 2 * config.poll_interval_s)
@@ -388,10 +395,8 @@ class _Flattener:
         a PROPOSED one is risk-checked anew and sent at most once, a RISK_APPROVED one is moved to
         unknown_pending (never resent). True iff something new was handed to the OMS."""
         r = self.rules[sym]
-        try:
-            quote = self.broker.quote(sym)
-        except Exception as e:
-            self._error("guardian.flatten", f"{sym} quote failed: {e!r}")
+        quote = self._quote(sym)
+        if quote is None:
             return False
         if resume is not None:
             intent, why = resume.intent, f"resume_{resume.state.value}"
@@ -422,6 +427,33 @@ class _Flattener:
                                      "type": typ.value, "quantity": qty, "price": price, "why": why,
                                      "sent": res.sent, "state": res.state.value})
         return not existed
+
+    def _quote(self, sym: str) -> Quote | None:
+        """broker.quote(); if it raises, the top of the broker's order book, else the caller's last
+        valid quote (audited as flatten_quote_fallback). None (error row; the caller counts a failed
+        attempt, which ends in needs_review + a guardian.alert) only when none of them is usable."""
+        try:
+            return self.broker.quote(sym)
+        except Exception as e:
+            err = e
+        fallback, source = None, None
+        try:
+            book = self.broker.depth(sym)
+            bid = book.bids[0][0]
+            ask = book.asks[0][0] if book.asks else bid
+            if bid > 0 and ask >= bid:
+                fallback, source = Quote(sym, bid, ask, float(book.ts)), "order_book"
+        except Exception:
+            pass
+        if fallback is None and sym in self.last_quotes:
+            fallback, source = self.last_quotes[sym], "last_known_quote"
+        if fallback is None:
+            self._error("guardian.flatten", f"{sym} quote failed and no order book or last known quote: {err!r}")
+            return None
+        self._audit("flatten_quote_fallback", {"episode": self.episode, "symbol": sym, "source": source,
+                                               "bid": fallback.bid, "ask": fallback.ask, "quote_ts": fallback.ts,
+                                               "error": repr(err)})
+        return fallback
 
     def _order_shape(self, r: SymbolRules, bid: Decimal, escalate: bool):
         if escalate:

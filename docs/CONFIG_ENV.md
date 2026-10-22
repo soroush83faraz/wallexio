@@ -62,6 +62,7 @@ Before arming, the evidence in BACKTEST.md must also be complete: backtest, sing
 Notes:
 
 - `mode: shadow` is accepted by the config loader and does not require `WALLEX_ARM_LIVE`. Shadow mode sends no orders: `python -m wallexbot bot --mode shadow` uses `ShadowBroker` over public GETs, and the guardian demo's `--mode shadow` only uses a dry-run flag on a mock. The bot takes the mode from `--mode`, not from the YAML, and reads no secrets.
+- Guardian stale action is a CLI flag, not YAML: `bot --stale-action hold|flatten` (in-process guardian) and `guardian --stale-action ...` (demo); default `hold`, anything else exits 2. It sets `GuardianConfig.stale_action` for a held symbol without a fresh quote for > 120 s.
 - `ANTHROPIC_API_KEY` is read only by `bot --advisor shadow` (via `redact.load_secret`); without it the bot warns and runs with `NullAdvisor`.
 - `mode: mock` is the default and uses no network writes.
 - Changing `mode` in the YAML file is not sufficient for live trading. The environment check still applies.
