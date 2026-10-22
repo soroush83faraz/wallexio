@@ -20,5 +20,8 @@ risk:
   consecutive_loss_cooldown: 3
   min_notional: "5"          # placeholder, unverified on Wallex
 fees:
+  # Scenario note public_usdt_0.002 (docs/COSTS.md): public pages give 0.2 % for USDT pairs
+  # (undated help page) and tiers by 30-day volume since 2025-08; our account's rate is unknown.
+  # The placeholder below is deliberately unchanged; read GET /v1/account/fee before changing it.
   taker_rate: "0.0035"       # placeholder, unverified
   maker_rate: "0.0035"

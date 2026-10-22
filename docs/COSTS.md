@@ -81,9 +81,10 @@ For every valid snapshot (both sides non-empty, best ask > best bid):
 - **Top 10 levels only.** Hidden or deeper liquidity, refills between snapshots, queue position,
   latency, partial fills and our own impact on later snapshots are not modelled. Orders bigger than the
   visible depth are extrapolated (flagged).
-- **Fee.** The taker fee is a placeholder (0.0035) or an ASSUMED scenario (0.002, 0.001); Wallex's real
-  fee is unverified. It is charged in quote on the notional, whereas Wallex may charge it in the received
-  asset.
+- **Fee.** The taker fee is a placeholder (0.0035) or an ASSUMED scenario (0.002, 0.001); our account's
+  real fee is unverified (public figures below). It is charged in quote on the notional, whereas Wallex
+  charges it per fill in `feeAsset`; the docs' trade example (a BUY on USDTTMN) shows it in the received
+  asset ([socket-private-channel](https://developers.wallex.ir/docs/socket-private-channel), 2026-10-22).
 - **Candle volume is unreliable** as a liquidity measure (forward-filled zero-volume minutes, unverified
   units); the recorded model does not use it. The proxy model still does, for uncalibrated symbols.
 - **Timing.** The books were recorded after the end of the 45-day candle history (after the reserved
@@ -91,6 +92,28 @@ For every valid snapshot (both sides non-empty, best ask > best bid):
   cost levels in September-October may have been different.
 - Exit parameters are unchanged (`ExitParams.breakeven_buffer_bps` stays 20 bps): with recorded costs an
   E4 "breakeven" stop can still realise a small loss on symbols whose exit cost is above 20 bps.
+
+## Fee: public sources (retrieved 2026-10-22)
+
+None of these is the fee of OUR account: Wallex fees are tier-dependent, and only `GET /v1/account/fee`
+(read key; `python -m wallexbot doctor` prints the highest maker/taker) returns ours. Persian sources, our
+translation. Code defaults are unchanged (`fees.taker_rate` 0.0035, placeholder).
+
+| Source | Date | What it says |
+|---|---|---|
+| Help centre, [commissions-calculate](https://wallex.ir/help/knowledge-base/commissions-calculate/) | undated | Toman-market fee by user level (last 3 months' volume); pairs such as BTC-USDT "fixed 0.2 %", independent of level. |
+| Blog, ["spot fees at Wallex reach 0.1 %"](https://wallex.ir/blog/%da%a9%d8%a7%d8%b1%d9%85%d8%b2%d8%af-%d9%85%d8%b9%d8%a7%d9%85%d9%84%d8%a7%d8%aa-%d8%a7%d8%b3%d9%be%d8%a7%d8%aa-%d8%af%d8%b1-%d9%88%d8%a7%d9%84%da%a9%d8%b3-%d8%a8%d9%87-%db%b0%d9%ab%db%b1%d9%aa-%d9%85/) | 2025-08-20 | New spot structure for Toman AND USDT markets, rates set by the last 30 days' volume (margin excluded); a 30-day 0.1 % offer for every user who activates it; otherwise 0.1 % only at high volume (e.g. over 20 billion toman a month). No tier table. |
+| API docs, [basic-services Swagger](https://developers.wallex.ir/assets/files/basic-services-89626420b5f06e4d7a2dc9206cdeb192.json) `FeeItem` | — | Example `"makerFeeRate": "0.00200000"`, `"takerFeeRate": "0.00200000"` for BTCUSDT: an example, not a schedule. |
+| Fee page, [wallex.ir/commission](https://wallex.ir/commission) | — | "Fees are a percentage of the total trade amount ... log in to view". Its table is loaded from `api.wallex.ir/v2/structured-fee`, not fetched (only developers.wallex.ir and wallex.ir were in scope). |
+| Markets API `is_zero_fee` | 2026-10-21 | false for all six USDT markets in `tests/fixtures/markets.json`. Past zero-fee offers (DOGE/SHIB in 2023, selling DOGS in 2024) were time-limited promotions. |
+
+Not found publicly: the current maker/taker table per tier for USDT markets, any fee-token discount, and
+the competition's fee rules (login-gated). The two public numbers conflict in time: the undated "0.2 %
+flat for USDT pairs" may predate the 2025-08 tiering.
+
+**Scenario note `public_usdt_0.002` (not a default):** the grid's existing `assumed_0.002` row equals the
+help-centre figure and the docs' example; `assumed_0.001` equals the 0.1 % offer or top tier. Whether to
+move `fees.taker_rate` off 0.0035 is the owner's decision, best made after reading `GET /v1/account/fee`.
 
 ## Refreshing the calibration
 

@@ -81,6 +81,9 @@ STRATEGIES = ("S0", "S1")
 EXITS = ("E1", "E2", "E3", "E4")
 PRE_REGISTERED_EXIT = "E4"
 # (label, taker rate, note). The primary one is the repo placeholder; the others are scenarios only.
+# Scenario note public_usdt_0.002 (docs/COSTS.md, public sources retrieved 2026-10-22): 0.002 is the
+# public "USDT pairs 0.2 %" figure and the API docs' fee example; 0.001 the 0.1 % offer / top tier.
+# Neither is our account's verified rate; labels and notes are left as they are.
 FEE_SCENARIOS = (
     ("primary_0.0035", Decimal("0.0035"), "PLACEHOLDER taker fee (config fees.taker_rate), unverified"),
     ("assumed_0.002", Decimal("0.002"), "ASSUMED fee scenario - real fee unverified"),
