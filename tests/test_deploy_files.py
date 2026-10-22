@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 UNITS = sorted((DEPLOY / "systemd").glob("wallexbot-*.service"))
 NEW_FILES = [ROOT / "Dockerfile", ROOT / ".dockerignore", ROOT / "docker-compose.yml", ROOT / "Makefile",
-             ROOT / "docs" / "DEPLOY.md", DEPLOY / "healthcheck.py",
+             ROOT / "docker-compose.snap.yml", ROOT / "docs" / "DEPLOY.md", DEPLOY / "healthcheck.py",
              DEPLOY / "env.example", *UNITS]
 KEYLIKE = re.compile(r"(?i)key|secret|token|passw|arm_live")
 
@@ -123,6 +123,49 @@ def test_compose_has_no_ports_and_is_hardened(compose):
         assert "environment" not in svc, name          # no inline values at all
         assert not svc.get("privileged") and "network_mode" not in svc and "devices" not in svc, name
     assert "wallex-data" in compose["volumes"]
+
+
+class _ComposeLoader(yaml.SafeLoader):
+    """safe_load that understands Compose's `!reset` merge tag (it stays visible as a marker)."""
+
+
+class _Reset(list):
+    pass
+
+
+_ComposeLoader.add_constructor("!reset", lambda loader, node: _Reset(loader.construct_sequence(node)))
+
+
+def test_snap_override_only_resets_security_opt_on_the_base_services(compose):
+    path = ROOT / "docker-compose.snap.yml"
+    snap = yaml.load(path.read_text(), Loader=_ComposeLoader)
+    assert set(snap) == {"services"}                                   # no volumes, networks, x- blocks, secrets
+    assert set(snap["services"]) == set(compose["services"]) == {"bot", "recorder"}
+    for name, svc in snap["services"].items():
+        assert set(svc) == {"security_opt"}, name                      # nothing but security_opt
+        assert isinstance(svc["security_opt"], _Reset) and svc["security_opt"] == [], name
+    code = [ln for ln in path.read_text().splitlines() if not ln.strip().startswith("#")]
+    assert not any(re.match(r"\s*(ports|expose|environment|env_file|command|privileged|volumes):", ln) for ln in code)
+    assert not any(KEYLIKE.search(ln) for ln in code)
+    assert "no-new-privileges" not in "\n".join(code)                 # the base file keeps the hardening
+    assert scan_text_for_secrets(path.read_text()) == []
+
+
+def test_snap_override_is_wired_into_make_and_documented():
+    make = (ROOT / "Makefile").read_text()
+    assert "docker-up-snap" in re.search(r"^\.PHONY:.*$", make, re.M).group(0)
+    rule = make.split("docker-up-snap:", 1)[1].splitlines()[1]
+    assert "-f docker-compose.yml -f docker-compose.snap.yml up -d --build" in rule
+    doc = (ROOT / "docs" / "DEPLOY.md").read_text()
+    assert "docker-compose.snap.yml" in doc and "make docker-up-snap" in doc
+
+
+def test_smoke_target_and_doc_section_exist():
+    make = (ROOT / "Makefile").read_text()
+    assert re.search(r"^smoke: ", make, re.M) and "deploy/smoke_shadow_fill.py" in make
+    assert "smoke" in re.search(r"^\.PHONY:.*$", make, re.M).group(0).split()
+    doc = (ROOT / "docs" / "DEPLOY.md").read_text()
+    assert "## Pre-deploy smoke test" in doc and "SMOKE TEST - forced test signal - SHADOW ONLY" in doc
 
 
 # ---------------------------------------------------------------- systemd

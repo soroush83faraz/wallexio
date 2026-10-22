@@ -1,0 +1,15 @@
+# Override for hosts where `no-new-privileges` breaks EVERY container (seen with snap-packaged Docker:
+# containers die at start with an exec / permission error that vanishes once the option is dropped).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.snap.yml up -d --build      # or: make docker-up-snap
+#
+# It does exactly one thing: it empties `security_opt` (the base file sets only no-new-privileges:true)
+# for both services. Everything else stays: read_only, cap_drop ALL, pids/mem/cpu limits, no ports,
+# no secrets. Needs Docker Compose >= 2.24 (the `!reset` tag). Use the base file wherever it works.
+# Shadow mode only: nothing here can reach a live order path.
+
+services:
+  bot:
+    security_opt: !reset []
+  recorder:
+    security_opt: !reset []
