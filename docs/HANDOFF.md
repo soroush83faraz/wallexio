@@ -55,10 +55,12 @@ instead of per-order human approval; no ICT strategy (the code was not available
 
 ## Known limitations and residual risks
 
-1. **Our fee is unknown.** The 0.35% taker fee is a placeholder; `/v1/account/fee` needs an API key. Public pages
+1. **Our fee is unknown.** The config default is now 0.2% maker/taker (`fees.*_rate` 0.002, formerly a 0.35%
+   planning placeholder); `/v1/account/fee` needs an API key (`doctor` reads it). Public pages
    (retrieved 2026-10-22, [COSTS.md](COSTS.md)) say 0.2% flat for USDT pairs (undated help page) but also that spot fees
    are tiered by 30-day volume since 2025-08, with 0.1% as an offer or top tier; the tier table is login-gated. "No edge"
-   is sensitive to it: the reports' 0.2% and 0.1% scenarios match these public figures but are not our verified rate.
+   is sensitive to it: the reports' 0.2% and 0.1% scenarios match these public figures but are not our verified rate;
+   the realistic scenario in the v2 reports is now the 0.002 column ([reports/README.md](../reports/README.md)).
 2. **Cost model is low-confidence**: about 1.2 h of books, p90 charged on every fill, candle volume unreliable
    (71-91% of 1m bars are forward-filled zeros).
 3. **`WallexBroker` is checked against Wallex's public docs and Swagger only** (2026-10-22); no private request has ever

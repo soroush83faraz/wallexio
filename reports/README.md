@@ -13,6 +13,19 @@
   `v2_summary.md`: best/worst exit per strategy, evidence count, buy-and-hold, S1 cost gate.
   Reproduce: `python -m wallexbot backtest --cost-source recorded --bar-minutes 15 60 --report-prefix v2_`.
 
+## Which fee column is realistic (2026-10-22)
+
+The `v2_*` files are historical and unchanged: they still call 0.0035 the "primary"/placeholder fee and
+rank best/worst exits at it. The config default is now 0.002 (`fees.taker_rate`, the flat 0.2 % for USDT
+pairs on Wallex's public, undated help page; still not our account's verified rate), so the realistic
+scenario is now the `assumed_0.002` column of `v2_summary.md`. In that column: S0 with the 15m train-best
+exit (E4) returns -8.84% on train (60 trades) and -8.17% on validation (54 trades); S0 with the 60m
+train-best exit (E2) returns -3.15% on train (33 trades) and -4.65% on validation (18 trades, n<30); the
+evidence count is 0/8 positive on train and 0/8 on validation for both bar sizes; S1 takes 0 trades, and
+its cost gate passes on 0 bars for every symbol, with round trips from 77 bps (BTCUSDT) to 326 bps
+(PEPEUSDT); equal-weight buy-and-hold returns 5.69% / -7.89% (15m train / validation) and 5.76% / -8.22%
+(60m). The verdict below holds unchanged at 0.002.
+
 ## Verdict (v2, recorded costs)
 
 There is no evidence of a net edge. Not one of the 48 strategy/exit/fee/bar-size configurations is

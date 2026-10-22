@@ -46,7 +46,8 @@ UNVERIFIED (the docs are silent; each choice below fails closed or reconciles):
   * status values beyond the examples NEW / FILLED / CANCELED and the prose-only FINISHED: see
     STATUS_MAP and _FILLED_WHEN_COMPLETE; any other value => a conservative OPEN state, logged;
   * the key under which openOrders lists orders (assumed "orders"; the docs show placeholders),
-    and whether a per_page of PER_PAGE is honoured there;
+    and whether a per_page of PER_PAGE is honoured there (open_orders() pages until a page is
+    empty or brings no unseen order id, never trusting a row count or a count field);
   * balance ``value`` read as the TOTAL (free = value - locked), the conservative reading;
   * stop orders: refused unless allow_stop_orders=True (trigger and locking behaviour unknown);
   * HTTP statuses for a duplicate client_id, insufficient balance, rate limiting or a missing
@@ -93,7 +94,8 @@ ENDPOINT_PATHS = frozenset({ORDERS_PATH, OPEN_ORDERS_PATH, BALANCES_PATH, FEE_PA
 STOP_PRICE_FIELD = "stop_Price"             # documented REQUEST field (create body)
 STOP_PRICE_RESPONSE_FIELD = "stopPrice"     # documented RESPONSE field (order object)
 PAGE_PARAM, PER_PAGE_PARAM = "page", "per_page"   # documented openOrders query parameters
-PER_PAGE, MAX_PAGES = 100, 20               # 100 = the documented max of the order-list endpoint
+PER_PAGE, MAX_PAGES = 100, 50               # 100 = the documented max of the order-list endpoint;
+# the openOrders docs name no per_page cap, so open_orders() never assumes PER_PAGE is honoured
 MAX_BODY_BYTES = 4 * 1024 * 1024
 MAX_FILLS = 1000
 USER_AGENT = "wallexbot/0.1"
@@ -623,7 +625,12 @@ class WallexAccountReader:
     def open_orders(self, symbol: str | None = None) -> list[BrokerOrder]:
         """Every page of GET OPEN_ORDERS_PATH. An order that is not ours (client id not in our
         format) and cannot be parsed is skipped with a warning; any other parse failure, or more
-        than MAX_PAGES pages, fails the whole call (a partial list could hide one of ours)."""
+        than MAX_PAGES pages, fails the whole call (a partial list could hide one of ours).
+
+        The docs are silent on a per_page cap for openOrders, so a short page is NOT read as the
+        last one (the server may cap below PER_PAGE): paging stops only at an empty page or at a
+        page that brings no previously unseen client id (paging ignored / repeated last page).
+        No count field (e.g. result_info) is trusted. The normal case costs one extra GET."""
         params: dict[str, object] = {} if symbol is None else {"symbol": _symbol(symbol)}
         found: dict[str, BrokerOrder] = {}
         ids: set[str] = set()
@@ -640,7 +647,7 @@ class WallexAccountReader:
                 parsed = self._open_row(row, cid)
                 if parsed is not None:
                     found[parsed.client_id] = parsed
-            if len(rows) < PER_PAGE or len(ids) == known:   # last page, or paging is ignored
+            if not rows or len(ids) == known:   # past the end, or paging ignored / page repeated
                 break
         else:
             raise BrokerDataError(f"openOrders: more than {MAX_PAGES} pages; refusing a partial list")

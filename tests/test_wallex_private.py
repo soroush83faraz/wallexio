@@ -330,13 +330,13 @@ def test_refused_cancel_returns_a_final_or_unknown_order_but_raises_while_open(a
 def test_open_orders_pages_through_all_pages(armed):
     page1 = [order_json(intent(sig=f"s{i}").client_id) for i in range(WP.PER_PAGE)]
     page2 = [order_json(CID), order_json(OTHER_CID, symbol="ETHUSDT")]
-    t = Scripted(ok({"orders": page1}), ok({"orders": page2}))
+    t = Scripted(ok({"orders": page1}), ok({"orders": page2}), ok({"orders": []}))
     orders = broker(t, armed).open_orders()
-    assert len(orders) == WP.PER_PAGE + 2 and len(t.calls) == 2
+    assert len(orders) == WP.PER_PAGE + 2 and len(t.calls) == 3   # a short page is not the end
     queries = [parse_qs(urlsplit(c.url).query) for c in t.calls]
-    assert queries == [{"page": ["1"], "per_page": ["100"]}, {"page": ["2"], "per_page": ["100"]}]
+    assert queries == [{"page": [str(n)], "per_page": ["100"]} for n in (1, 2, 3)]
     assert all(urlsplit(c.url).path == "/v1/account/openOrders" and c.method == "GET" for c in t.calls)
-    t = Scripted(ok({"orders": page2}))
+    t = Scripted(ok({"orders": page2}), ok({"orders": []}))
     only = broker(t, armed).open_orders(SYM)
     assert [o.client_id for o in only] == [CID]                       # filtered client-side too
     assert parse_qs(urlsplit(t.calls[0].url).query)["symbol"] == [SYM]
@@ -355,10 +355,67 @@ def test_open_orders_stops_when_paging_is_ignored_and_refuses_endless_pages(arme
         broker(endless, armed).open_orders()
 
 
+def capped_server(rows, cap, *, info=None):
+    """An openOrders endpoint that honours ``page`` but silently caps per_page at ``cap``."""
+    calls = []
+
+    def transport(method, url, headers, body, timeout):
+        q = parse_qs(urlsplit(url).query)
+        page = int(q["page"][0])
+        calls.append(page)
+        return ok({"orders": rows[(page - 1) * cap: page * cap]}, info=info)
+    return transport, calls
+
+
+def test_open_orders_keeps_paging_when_the_server_caps_per_page_below_the_request(armed):
+    """The docs give no per_page cap: a 10-row page for a per_page=100 request is not the end."""
+    rows = [order_json(intent(sig=f"c{i}").client_id) for i in range(25)]
+    t, calls = capped_server(rows, 10, info={"count": 10})   # a count field is never trusted
+    orders = broker(t, armed).open_orders()
+    assert sorted(o.client_id for o in orders) == sorted(r["clientOrderId"] for r in rows)
+    assert calls == [1, 2, 3, 4]                              # 10 + 10 + 5, then an empty page
+
+
+def test_open_orders_costs_exactly_one_extra_get_in_the_normal_case(armed):
+    t = Scripted(ok({"orders": [order_json(CID), order_json(OTHER_CID)]}), ok({"orders": []}))
+    assert {o.client_id for o in broker(t, armed).open_orders()} == {CID, OTHER_CID}
+    assert len(t.calls) == 2
+
+
+def test_open_orders_empty_first_page_is_a_single_get(armed):
+    t = Scripted(ok({"orders": []}))
+    assert broker(t, armed).open_orders() == [] and len(t.calls) == 1
+
+
+def test_open_orders_stops_on_a_repeated_page_and_dedupes_ids_across_pages(armed):
+    a, b, c = (intent(sig=s).client_id for s in ("d1", "d2", "d3"))
+    # a short page repeated verbatim (page ignored, or a server repeating its last page)
+    t = Scripted(ok({"orders": [order_json(a), order_json(b)]}),
+                 ok({"orders": [order_json(a), order_json(b)]}))
+    assert sorted(o.client_id for o in broker(t, armed).open_orders()) == sorted([a, b])
+    assert len(t.calls) == 2
+    # pages overlapping (the book shifted between requests): b is listed once, c is not lost
+    t = Scripted(ok({"orders": [order_json(a), order_json(b)]}),
+                 ok({"orders": [order_json(b), order_json(c)]}), ok({"orders": []}))
+    orders = broker(t, armed).open_orders()
+    assert sorted(o.client_id for o in orders) == sorted([a, b, c]) and len(t.calls) == 3
+
+
+def test_open_orders_refuses_a_partial_list_past_the_page_cap(armed):
+    rows = [order_json(intent(sig=f"p{i}").client_id) for i in range(WP.MAX_PAGES + 1)]
+    t, calls = capped_server(rows, 1)                        # one row per page, never-ending
+    with pytest.raises(BrokerDataError, match="refusing a partial list"):
+        broker(t, armed).open_orders()
+    assert calls == list(range(1, WP.MAX_PAGES + 1))
+    t, calls = capped_server(rows[:WP.MAX_PAGES - 1], 1)     # the empty page fits in the cap
+    assert len(broker(t, armed).open_orders()) == WP.MAX_PAGES - 1
+    assert len(calls) == WP.MAX_PAGES
+
+
 def test_open_orders_skips_only_unparseable_orders_that_are_not_ours(armed, caplog):
     foreign = order_json(FOREIGN_CID, type_="OCO")
     rows = [foreign, order_json(CID)]
-    orders = broker(Scripted(ok({"orders": rows})), armed).open_orders()
+    orders = broker(Scripted(ok({"orders": rows}), ok({"orders": []})), armed).open_orders()
     assert [o.client_id for o in orders] == [CID]
     assert "did not place" in caplog.text
     for bad_rows in ([order_json(CID, type_="OCO")], [{"symbol": SYM, "status": "NEW"}]):

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,8 @@ def _healthcheck():
 
 
 def test_demo_full_lifecycle_and_strict_abstains_under_realistic_costs(tmp_path):
-    cfg = load_config(env={})                      # default (realistic placeholder) fees: 0.35 % taker
+    cfg = load_config(env={})                      # default fees: 0.2 % taker (public USDT-pair rate)
+    assert cfg.taker_rate == Decimal("0.002") and cfg.maker_rate == Decimal("0.002")
     data = _replay_dir(tmp_path)
     strict = bot_main.run_replay(tmp_path / "s.db", data, cfg, profile="strict")
     assert strict["intents"] == 0 and strict["signals"] == 0 and strict["profile"] == "strict"

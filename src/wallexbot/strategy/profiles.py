@@ -1,6 +1,6 @@
 """Strategy profiles for the bot: `strict` (S1 as specified) and `demo` (an EXERCISE profile).
 
-strict  MomentumParams() unchanged. Under realistic costs (0.35 % taker per side, see
+strict  MomentumParams() unchanged. Under realistic costs (the default 0.2 % taker per side, see
         docs/COSTS.md and reports/v2_summary.md) its cost gate is practically unreachable, so a
         strict mock/shadow run usually shows abstentions only. That is the honest default.
 

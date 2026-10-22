@@ -20,8 +20,10 @@ risk:
   consecutive_loss_cooldown: 3
   min_notional: "5"          # placeholder, unverified on Wallex
 fees:
-  # Scenario note public_usdt_0.002 (docs/COSTS.md): public pages give 0.2 % for USDT pairs
-  # (undated help page) and tiers by 30-day volume since 2025-08; our account's rate is unknown.
-  # The placeholder below is deliberately unchanged; read GET /v1/account/fee before changing it.
-  taker_rate: "0.0035"       # placeholder, unverified
-  maker_rate: "0.0035"
+  # 0.002 = the flat 0.2 % for USDT pairs documented on a PUBLIC, UNDATED Wallex help page
+  # (wallex.ir/help/knowledge-base/commissions-calculate/; the API docs' fee example is also
+  # 0.002/0.002), see docs/COSTS.md. Real rates are tier/volume dependent and our account's rate
+  # is unverified: read GET /v1/account/fee (`python -m wallexbot doctor`) before trusting it.
+  # (Before 2026-10 the default was 0.0035, an unverified planning assumption.)
+  taker_rate: "0.002"        # documented public USDT-pair rate; account rate unverified
+  maker_rate: "0.002"

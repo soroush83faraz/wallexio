@@ -81,7 +81,8 @@ For every valid snapshot (both sides non-empty, best ask > best bid):
 - **Top 10 levels only.** Hidden or deeper liquidity, refills between snapshots, queue position,
   latency, partial fills and our own impact on later snapshots are not modelled. Orders bigger than the
   visible depth are extrapolated (flagged).
-- **Fee.** The taker fee is a placeholder (0.0035) or an ASSUMED scenario (0.002, 0.001); our account's
+- **Fee.** The grid's fee scenarios are 0.0035 (conservative; the former placeholder), 0.002 (the documented public
+  USDT-pair rate, now the config default) and 0.001 (offer / top tier); our account's
   real fee is unverified (public figures below). It is charged in quote on the notional, whereas Wallex
   charges it per fill in `feeAsset`; the docs' trade example (a BUY on USDTTMN) shows it in the received
   asset ([socket-private-channel](https://developers.wallex.ir/docs/socket-private-channel), 2026-10-22).
@@ -97,7 +98,8 @@ For every valid snapshot (both sides non-empty, best ask > best bid):
 
 None of these is the fee of OUR account: Wallex fees are tier-dependent, and only `GET /v1/account/fee`
 (read key; `python -m wallexbot doctor` prints the highest maker/taker) returns ours. Persian sources, our
-translation. Code defaults are unchanged (`fees.taker_rate` 0.0035, placeholder).
+translation. The config default `fees.taker_rate` / `fees.maker_rate` is 0.002 (the help-centre figure below; it was
+0.0035, an unverified planning assumption, until 2026-10-22).
 
 | Source | Date | What it says |
 |---|---|---|
@@ -111,9 +113,10 @@ Not found publicly: the current maker/taker table per tier for USDT markets, any
 the competition's fee rules (login-gated). The two public numbers conflict in time: the undated "0.2 %
 flat for USDT pairs" may predate the 2025-08 tiering.
 
-**Scenario note `public_usdt_0.002` (not a default):** the grid's existing `assumed_0.002` row equals the
-help-centre figure and the docs' example; `assumed_0.001` equals the 0.1 % offer or top tier. Whether to
-move `fees.taker_rate` off 0.0035 is the owner's decision, best made after reading `GET /v1/account/fee`.
+**Scenario note `public_usdt_0.002` (now the config default):** the grid's existing `assumed_0.002` row equals
+the help-centre figure and the docs' example; `assumed_0.001` equals the 0.1 % offer or top tier. The default
+`fees.taker_rate` / `fees.maker_rate` is 0.002; it is still not our verified rate. Read `GET /v1/account/fee`
+(`python -m wallexbot doctor`) before trusting it, and set the config to the account's highest rate if it differs.
 
 ## Refreshing the calibration
 
