@@ -65,11 +65,11 @@ def test_kill_switch(engine, ks):
 
 def test_stale_quote(engine, cfg):
     assert_ok(run(engine, quote=replace(QUOTE, ts=NOW - cfg.max_data_age_s)))
-    assert_reject(run(engine, quote=replace(QUOTE, ts=NOW - cfg.max_data_age_s - 1)), "stale_quote")
-    assert_reject(run(engine, quote=replace(QUOTE, ts=NOW + 60)), "quote_from_future")
+    assert_reject(run(engine, quote=replace(QUOTE, ts=NOW - cfg.max_data_age_s - 1)), "quote_stale")
+    assert_reject(run(engine, quote=replace(QUOTE, ts=NOW + 60)), "quote_future_ts")
     assert_reject(run(engine, quote=None), "no_quote")
     assert_reject(run(engine, quote=replace(QUOTE, symbol="ETHUSDT")), "quote_symbol_mismatch")
-    assert_reject(run(engine, quote=replace(QUOTE, bid=D("60020"))), "bad_quote")
+    assert_reject(run(engine, quote=replace(QUOTE, bid=D("60020"))), "quote_crossed")
 
 
 def test_unknown_symbol(engine):
