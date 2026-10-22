@@ -35,7 +35,9 @@ One tick:
    Kill switch release. Every engagement stays until an operator disengages it, EXCEPT the
    guardian's own transient one (reason 'auto:...', actor 'guardian', still the latest row): the
    guardian releases that after auto_release_clear_ticks (3) consecutive clear ticks spanning at
-   least auto_release_clear_s (60 s), as an audited 'release_kill_switch' event. A latching
+   least auto_release_clear_s (60 s) of wall-clock AND monotonic time, as an audited
+   'release_kill_switch' event. The release is a compare-and-set in one IMMEDIATE store
+   transaction: only the row id the clear streak observed, still the latest, is released. A latching
    condition seen while only a transient engagement holds the switch writes a new, latching row
    on top (KillSwitch.engage_unless_held), so it can never be auto-released.
 5. Every decision is appended to audit_events with actor='guardian' (and kill-switch rows carry
@@ -113,14 +115,18 @@ class Guardian:
     def __init__(self, store, broker, risk, killswitch, oms, config: GuardianConfig | None = None,
                  clock: Callable[[], float] = time.time, *, sleep: Callable[[float], Any] = time.sleep,
                  depth_fn: Callable[[str], Sequence] | None = None,
-                 universe: Callable[[], Iterable[str]] | None = None) -> None:
+                 universe: Callable[[], Iterable[str]] | None = None,
+                 monotonic: Callable[[], float] | None = None) -> None:
         """`universe`: symbols to quote and watch besides every symbol held (ledger or exchange
         balance). None = every symbol in the risk rules. The in-process guardian passes the bot's
-        trading universe, so it does not quote hundreds of markets the bot never trades."""
+        trading universe, so it does not quote hundreds of markets the bot never trades.
+        `monotonic`: the clock the auto-release window must ALSO have elapsed on (default
+        time.monotonic; a simulated run passes its simulated clock)."""
         self.store, self.broker, self.risk, self.ks, self.oms = store, broker, risk, killswitch, oms
         self.universe = universe
         self.cfg = config or GuardianConfig()
         self.clock, self.sleep, self.depth_fn = clock, sleep, depth_fn
+        self.monotonic = monotonic or time.monotonic
         self.quote_ccy = self.cfg.quote_currency or risk.config.quote_currency
         self.max_age = float(self.cfg.max_data_age_s if self.cfg.max_data_age_s is not None
                              else risk.config.max_data_age_s)
@@ -131,8 +137,10 @@ class Guardian:
         self._mismatch_streak: dict[str, int] = {}
         self._reviewed: frozenset[str] = frozenset()
         self._last_logged: tuple | None = None
+        self._clear_row: int | None = None
         self._clear_ticks = 0
         self._clear_since: float | None = None
+        self._clear_mono: float | None = None
 
     # ------------------------------------------------------------------ public
     def tick(self) -> TickReport:
@@ -242,26 +250,43 @@ class Guardian:
     def _auto_release(self, now: float, rep: TickReport, condition_present: bool) -> None:
         """Release the kill switch ONLY when its latest row is the guardian's own transient
         ('auto:') engagement and no freezing condition has been seen for auto_release_clear_ticks
-        consecutive ticks spanning at least auto_release_clear_s. Anything else (operator, bot,
-        latching guardian reasons, a row written after ours) is never touched. Audited."""
-        if condition_present or not self.ks.held_by_transient():
-            self._clear_ticks, self._clear_since = 0, None
+        consecutive ticks spanning at least auto_release_clear_s of BOTH wall-clock and monotonic
+        time (a forward wall-clock jump cannot shorten the window; a backward step restarts it).
+        The clear streak belongs to one observed row id: a different latest row restarts it. The
+        release is a compare-and-set in one store transaction (KillSwitch.release_transient): if
+        the latest row is no longer the observed one (an operator / bot row written meanwhile by
+        any connection), nothing is written and the streak resets. Audited."""
+        ev = None if condition_present else self.ks.latest_transient()
+        if ev is None:
+            self._reset_clear()
             return
-        if self._clear_since is None or not self._clear_since <= now:   # first clear tick / clock stepped back
-            self._clear_ticks, self._clear_since = 0, now
+        mono = float(self.monotonic())
+        if (self._clear_row != ev.id or self._clear_since is None or not self._clear_since <= now
+                or not self._clear_mono <= mono):          # new row / first clear tick / clock stepped back
+            self._clear_row, self._clear_ticks, self._clear_since, self._clear_mono = ev.id, 0, now, mono
         self._clear_ticks += 1
-        clear_s = now - self._clear_since
-        if self._clear_ticks < self.cfg.auto_release_clear_ticks or clear_s < self.cfg.auto_release_clear_s:
+        clear_s, clear_mono_s = now - self._clear_since, mono - self._clear_mono
+        floor = self.cfg.auto_release_clear_s
+        if self._clear_ticks < self.cfg.auto_release_clear_ticks or clear_s < floor or clear_mono_s < floor:
             return
-        released = self.store.latest_killswitch().reason
-        self.ks.disengage(f"guardian auto-release: '{released}' clear for {self._clear_ticks} ticks / "
-                          f"{int(clear_s)}s", actor=ACTOR, ts=now)
+        released = ev.reason
+        if not self.ks.release_transient(ev.id, f"guardian auto-release: '{released}' clear for "
+                                         f"{self._clear_ticks} ticks / {int(clear_s)}s", actor=ACTOR, ts=now):
+            self._audit("release_kill_switch_refused", {"observed": released, "observed_id": ev.id,
+                                                        "why": "latest kill-switch row changed"}, now)
+            log.warning("guardian: auto-release refused: the latest kill-switch row is no longer %r", released)
+            self._reset_clear()
+            return
         rep.actions.append("release_kill_switch")
         self._audit("release_kill_switch", {"released": released, "clear_ticks": self._clear_ticks,
-                                            "clear_s": round(clear_s, 3)}, now)
+                                            "clear_s": round(clear_s, 3), "clear_mono_s": round(clear_mono_s, 3)},
+                    now)
         log.warning("guardian: kill switch auto-released (%s clear for %d ticks / %ds)", released,
                     self._clear_ticks, int(clear_s))
-        self._clear_ticks, self._clear_since = 0, None
+        self._reset_clear()
+
+    def _reset_clear(self) -> None:
+        self._clear_row, self._clear_ticks, self._clear_since, self._clear_mono = None, 0, None, None
 
     def _flatten(self, cause: str, hard: bool, reason: str, account: AccountState | None) -> FlattenResult:
         return flatten_all(self.store, self.broker, self.oms, self.ks, cause=cause, hard=hard,

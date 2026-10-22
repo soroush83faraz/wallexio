@@ -78,12 +78,13 @@ def build_guardian(store: Store, broker, rules: Mapping[str, SymbolRules], confi
                    gconfig: GuardianConfig | None = None, *, clock: Callable[[], float] = time.time,
                    sleep: Callable[[float], Any] = time.sleep,
                    depth_fn: Callable[[str], Sequence] | None = None,
-                   universe: Callable[[], Iterable[str]] | None = None) -> Guardian:
+                   universe: Callable[[], Iterable[str]] | None = None,
+                   monotonic: Callable[[], float] | None = None) -> Guardian:
     ks = KillSwitch(store)
     risk = RiskEngine(config, rules, ks)
     oms = OMS(store, broker, risk, ks, clock=clock)  # default approval: risk-approved only
     return Guardian(store, broker, risk, ks, oms, gconfig, clock, sleep=sleep, depth_fn=depth_fn,
-                    universe=universe)
+                    universe=universe, monotonic=monotonic)
 
 
 class InProcessGuardian:
@@ -95,7 +96,8 @@ class InProcessGuardian:
     def __init__(self, db_path: str | Path, broker, rules: Mapping[str, SymbolRules], config: Config,
                  gconfig: GuardianConfig | None = None, *, clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], Any] = time.sleep, interval_s: float = DEFAULT_INTERVAL_S,
-                 universe: Callable[[], Iterable[str]] | None = None, max_consecutive_failures: int = 3) -> None:
+                 universe: Callable[[], Iterable[str]] | None = None, max_consecutive_failures: int = 3,
+                 monotonic: Callable[[], float] | None = None) -> None:
         if str(db_path) == ":memory:":
             raise ValueError("the in-process guardian needs a database file (a second :memory: connection "
                              "is a different, empty database)")
@@ -104,7 +106,7 @@ class InProcessGuardian:
         self.clock, self.interval_s, self.max_failures = clock, float(interval_s), max_consecutive_failures
         self.store = Store(db_path, clock=clock)
         self.guardian = build_guardian(self.store, broker, rules, config, gconfig, clock=clock, sleep=sleep,
-                                       universe=universe)
+                                       universe=universe, monotonic=monotonic)
         self.ticks = self.failed_ticks = self.consecutive_failures = 0
         self.last_report: TickReport | None = None
         self._last: float | None = None

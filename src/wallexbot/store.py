@@ -148,6 +148,7 @@ class KillswitchEvent:
     reason: str
     actor: str
     ts: float
+    id: int = dataclasses.field(default=0, compare=False)   # rowid: identifies the row for compare-and-set
 
 
 def _jsonable(obj: Any) -> Any:
@@ -496,7 +497,23 @@ class Store:
             return None
         if r["engaged"] not in (0, 1):
             raise StoreError(f"corrupt killswitch row {r['id']}")
-        return KillswitchEvent(bool(r["engaged"]), r["reason"], r["actor"], r["ts"])
+        return KillswitchEvent(bool(r["engaged"]), r["reason"], r["actor"], r["ts"], int(r["id"]))
+
+    def disengage_killswitch_if_latest(self, expected_id: int, reason: str, actor: str, *,
+                                       require_actor: str, require_prefix: str,
+                                       ts: float | None = None) -> KillswitchEvent | None:
+        """Compare-and-set release, in ONE IMMEDIATE transaction: the write lock is taken first,
+        then the latest killswitch row is re-read, and a disengage row is appended only if that row
+        is still `expected_id`, engaged, written by `require_actor` with a reason starting with
+        `require_prefix`. Returns the released row, or None (nothing written). A row another
+        connection wrote after the caller looked is therefore never released."""
+        with self.tx():
+            ev = self.latest_killswitch()
+            if ev is None or ev.id != expected_id or ev.engaged is not True or ev.actor != require_actor \
+                    or not isinstance(ev.reason, str) or not ev.reason.startswith(require_prefix):
+                return None
+            self.append_killswitch_event(False, reason, actor, ts=ts)
+            return ev
 
     def latest_event_ts(self, actor: str, kind: str) -> float | None:
         r = self._conn.execute("SELECT ts FROM audit_events WHERE actor=? AND kind=? ORDER BY id DESC LIMIT 1",

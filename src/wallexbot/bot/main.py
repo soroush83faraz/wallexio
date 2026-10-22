@@ -186,12 +186,13 @@ def build_bot(feed, oms, risk, store, ks, config: Config, clock, *, advisor: Any
 
 
 def make_guardian(enabled: bool, db: str | Path, broker, rules: Mapping[str, SymbolRules], config: Config,
-                  clock, sleep, interval_s: float, universe) -> InProcessGuardian | None:
+                  clock, sleep, interval_s: float, universe, *, monotonic=None) -> InProcessGuardian | None:
+    """`monotonic`: None = time.monotonic (real runs); a simulated / injected clock passes itself."""
     if not enabled:
         return None
     try:
         return InProcessGuardian(db, broker, rules, config, clock=clock, sleep=sleep, interval_s=interval_s,
-                                 universe=universe)
+                                 universe=universe, monotonic=monotonic)
     except ValueError as e:
         raise BotSetupError(f"guardian: {e} (or pass --no-guardian)") from e
 
@@ -311,7 +312,7 @@ def run_replay(db: str | Path, replay_dir: str | Path, config: Config, *, step_s
         bot = build_bot(feed, oms, risk, store, ks, config, clock, advisor=advisor, params=params, profile=profile,
                         run_info=_run_info("mock", profile, guardian, guardian_interval_s, replay=True))
         gd = make_guardian(guardian, db, broker, rules, config, clock, clock.advance, guardian_interval_s,
-                           lambda: set(feed.symbols()) | set(bot.positions))
+                           lambda: set(feed.symbols()) | set(bot.positions), monotonic=clock)
         ticks = 0
         while clock() <= last + MIN_S and not stop.is_set() and (max_ticks is None or ticks < max_ticks):
             rep = bot.tick()
@@ -358,7 +359,8 @@ def run_feed_loop(mode: str, db: str | Path, config: Config, *, interval_s: floa
         bot = build_bot(feed, oms, risk, store, ks, config, clock, advisor=advisor, profile=profile,
                         run_info=_run_info(mode, profile, guardian, guardian_interval_s))
         gd = make_guardian(guardian, db, broker, rules, config, clock, sleep, guardian_interval_s,
-                           lambda: set(feed.symbols()) | set(bot.positions))
+                           lambda: set(feed.symbols()) | set(bot.positions),
+                           monotonic=None if clock is time.time else clock)
         ticks = 0
         while not stop.is_set() and (max_ticks is None or ticks < max_ticks):
             pre_tick(feed, broker, clock)
