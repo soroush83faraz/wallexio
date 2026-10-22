@@ -17,7 +17,7 @@ loses money on every train/validation configuration ([reports/README.md](../repo
 
 | Check | Result |
 |---|---|
-| `pytest -q` | 1970 passed (fresh venv, ~2 min; was 1948 at the first handoff) |
+| `pytest -q` | 1974 passed (fresh venv, ~2 min; 1970 before the public-docs check of the private client, 1948 at the first handoff) |
 | `ruff check --select F,E9` (src, tests, deploy) | clean (run in a throwaway venv; ruff is not a project dependency) |
 | `mypy --ignore-missing-imports src` | **113 findings in 24 files**, informational. The project has no type-check config and was never type-clean; not addressed |
 | `pip wheel .` / non-editable install | wheel contains `wallexbot/default_config.yaml` (inspected by `tests/test_packaging.py`); installed into a fresh venv **outside the repo** it ran `demo`, loaded the default config and refused `bot --mode live` (exit 2) |
@@ -55,14 +55,19 @@ instead of per-order human approval; no ICT strategy (the code was not available
 
 ## Known limitations and residual risks
 
-1. **Fee unknown.** The 0.35% taker fee is a placeholder; `/v1/account/fee` needs an API key. The conclusion "no edge"
-   is sensitive to it (see the 0.2% and 0.1% scenarios in the reports, which are assumptions).
+1. **Our fee is unknown.** The 0.35% taker fee is a placeholder; `/v1/account/fee` needs an API key. Public pages
+   (retrieved 2026-10-22, [COSTS.md](COSTS.md)) say 0.2% flat for USDT pairs (undated help page) but also that spot fees
+   are tiered by 30-day volume since 2025-08, with 0.1% as an offer or top tier; the tier table is login-gated. "No edge"
+   is sensitive to it: the reports' 0.2% and 0.1% scenarios match these public figures but are not our verified rate.
 2. **Cost model is low-confidence**: about 1.2 h of books, p90 charged on every fill, candle volume unreliable
    (71-91% of 1m bars are forward-filled zeros).
-3. **`WallexBroker` is unverified against the real API**: endpoint paths, the `stop_Price` spelling, response envelope,
-   status mapping, "balance value is the total", duplicate-client_id detection are all assumptions
-   ([WALLEX_INTEGRATION.md](WALLEX_INTEGRATION.md)). A same-host 301-303 redirect after a POST becomes a GET that still
-   carries the key header (low severity: pinned host, TLS).
+3. **`WallexBroker` is checked against Wallex's public docs and Swagger only** (2026-10-22); no private request has ever
+   been made. Paths, headers, envelope, create body (`stop_Price`), order and fill objects, 404 for an unknown order,
+   paging parameters and balance/fee rows match the docs; two mismatches were fixed (responses spell the stop price
+   `stopPrice`; every request needs `Content-Type: application/json`). Still unverified: the status enum, the openOrders
+   list key, "balance value is the total", the HTTP status of a duplicate client_id / insufficient balance / rate limit,
+   minimum order size ([WALLEX_INTEGRATION.md](WALLEX_INTEGRATION.md)). A same-host 301-303 redirect after a POST becomes
+   a GET that still carries the key header (low severity: pinned host, TLS).
 4. **ShadowBroker fill model is an assumption set**, not validated against real fills; it reads a cached book up to 60 s old.
 5. **Statistical power is tiny**: 45 days, few trades (many cells n < 30). The test split is reserved and unused.
 6. **Kill switch semantics**: "latest" means highest row id, so someone with raw write access to the SQLite file can defeat
@@ -95,7 +100,8 @@ instead of per-order human approval; no ICT strategy (the code was not available
 
 Any validated backtest; the one-time test-set evaluation (`backtest --final-test` exists, refuses without frozen
 params, and has never been consumed); a 24-48 h shadow run (the promotion criterion in BACKTEST.md); any check of the
-private client against Wallex; any live run; the official competition rules (login-gated, never read).
+private client against the live API (only the public docs were compared); any live run; the official competition rules
+(login-gated, never read).
 
 ## Recommended next steps (in order)
 
@@ -106,8 +112,8 @@ private client against Wallex; any live run; the official competition rules (log
    `--profile demo` only to exercise the pipeline, never as evidence.
 4. If a strategy variant is worth testing (other horizon, maker-only entries, other markets), pre-register it, pick it
    on train/validation only, freeze parameters, then spend the test split exactly once.
-5. Verify `WallexBroker` against Wallex's Swagger and, only with explicit owner approval, a tiny-size live test; run
-   `doctor` with a **read-only** key first. Never enable Withdraw.
+5. The Swagger check is done (WALLEX_INTEGRATION.md). Next run `doctor` with a **read-only** key to confirm the real
+   response shapes, then, only with explicit owner approval, a tiny-size live test. Never enable Withdraw.
 6. Housekeeping: decide on a type-checking policy (113 mypy findings).
 
 ## Verification history (why the safety claims are believable)

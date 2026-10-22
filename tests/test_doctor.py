@@ -51,12 +51,25 @@ def isolated_registry():
     R._reset_registry(saved)
 
 
-def envelope(result, success=True, message="The operation was successful"):
-    return json.dumps({"result": result, "message": message, "success": success}).encode()
+def envelope(result, success=True, message="The operation was successful", code=None):
+    """The documented envelope; error bodies (success false) also carry ``code`` when given."""
+    payload = {"result": result, "message": message, "success": success}
+    if code is not None:
+        payload["code"] = code
+    return json.dumps(payload).encode()
+
+
+def balance_row(asset, value, locked):
+    """Every field of the documented AccountBalanceItem (8-decimal strings, as in the docs)."""
+    return {"asset": asset, "asset_png_icon": "-", "asset_svg_icon": "-", "faName": asset.lower(),
+            "fiat": False, "value": value, "locked": locked, "is_dust": False,
+            "is_digital_gold": False}
 
 
 class FakeReadApi:
-    """Answers the private READ endpoints the way the adapter assumes Wallex does."""
+    """Answers the private READ endpoints in the shapes Wallex's public docs give (balances, fee
+    and order rows, 404 + success:false for an unknown order) and, where they are silent, the way
+    the adapter assumes (the "orders" key of openOrders)."""
 
     def __init__(self, *, date=DATE, key=FAKE_READ_KEY, overrides=None, echo_order=False):
         self.date, self.key, self.echo_order = date, key, echo_order
@@ -72,24 +85,31 @@ class FakeReadApi:
                 return status, got, payload
         presented = headers.get("X-API-Key")
         if presented != self.key:                 # a hostile server echoes the key it was sent
-            return 401, got, envelope({}, False, f"invalid api key {presented}")
+            return 401, got, envelope({}, False, f"invalid api key {presented}", code=401)
         if path == "/v1/account/balances":
             return 200, got, envelope({"balances": {
-                "USDT": {"asset": "USDT", "value": "100.5000000000000000", "locked": "0.5"},
-                "BTC": {"asset": "BTC", "value": "0", "locked": "0"}}})
+                "USDT": balance_row("USDT", "100.50000000", "0.50000000"),
+                "BTC": balance_row("BTC", "0.00000000", "0.00000000")}})
         if path == "/v1/account/fee":
             return 200, got, envelope({
-                "BTCUSDT": {"makerFeeRate": "0.0020", "takerFeeRate": "0.0025", "recent_days_sum": 0},
-                "ETHUSDT": {"makerFeeRate": "0.0030", "takerFeeRate": "0.0035", "recent_days_sum": 0}})
+                "BTCUSDT": {"makerFeeRate": "0.00200000", "takerFeeRate": "0.00250000",
+                            "recent_days_sum": 250000000.0},
+                "ETHUSDT": {"makerFeeRate": "0.00300000", "takerFeeRate": "0.00350000",
+                            "recent_days_sum": 0}})
         if path == "/v1/account/openOrders":
             return 200, got, envelope({"orders": []})
         if path.startswith("/v1/account/orders/"):
             if self.echo_order:
                 cid = path.rsplit("/", 1)[1]
                 return 200, got, envelope({
-                    "clientOrderId": cid, "symbol": "BTCUSDT", "side": "BUY", "type": "MARKET",
-                    "origQty": "1", "status": "NEW", "fills": []})
-            return 404, got, envelope({}, False, "Order not found.")
+                    "active": True, "clientOrderId": cid, "created_at": "2025-04-06T11:27:28Z",
+                    "executedPercent": 0, "executedPrice": "0", "executedQty": "0",
+                    "executedSum": "0", "fee": "0", "fills": [], "origQty": "1.0000000000000000",
+                    "price": "0", "side": "BUY", "status": "NEW", "stopPrice": None,
+                    "stopPriceCondition": None, "sum": "0", "symbol": "BTCUSDT",
+                    "transactTime": 1743938848, "type": "MARKET",
+                    "updated_at": "2025-04-06T11:27:28Z"})
+            return 404, got, envelope({}, False, "Order not found.", code=404)
         return 404, got, b"<html>404 Not Found</html>"
 
 

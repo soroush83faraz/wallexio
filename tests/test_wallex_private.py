@@ -1,8 +1,10 @@
 """WallexBroker / WallexAccountReader: fake transports only (no network) and FAKE keys only.
 
-Every Wallex response here is HAND-WRITTEN to the shapes the adapter assumes (listed in
-wallexbot.exchange.wallex_private); no private response has ever been captured. These tests pin
-the adapter's behaviour and its fail-closed edges, not Wallex's real API.
+Every Wallex response here is HAND-WRITTEN; no private response has ever been captured. The
+shapes follow Wallex's public docs and Swagger files where those document them (order object,
+fills, error body, balances and fee rows; see docs/WALLEX_INTEGRATION.md) and the adapter's
+assumptions elsewhere (e.g. the "orders" key of openOrders). These tests pin the adapter's
+behaviour and its fail-closed edges, not Wallex's real API.
 """
 from __future__ import annotations
 
@@ -105,12 +107,16 @@ class Scripted:
         return r
 
 
-def envelope(result, *, success=True, message="The operation was successful"):
-    return json.dumps({"result": result, "message": message, "success": success}).encode()
+def envelope(result, *, success=True, message="The operation was successful", info=None):
+    """The documented envelope; list endpoints (openOrders) add a top-level ``result_info``."""
+    payload = {"result": result, "message": message, "success": success}
+    if info is not None:
+        payload["result_info"] = info
+    return json.dumps(payload).encode()
 
 
-def ok(result, status=200, headers=None):
-    return status, dict(headers or {"Content-Type": "application/json"}), envelope(result)
+def ok(result, status=200, headers=None, info=None):
+    return status, dict(headers or {"Content-Type": "application/json"}), envelope(result, info=info)
 
 
 def fail(status, message, **errors):
@@ -128,21 +134,28 @@ def w16(x) -> str:
 
 
 def fill_json(price, qty, fee, asset, symbol=SYM):
+    """A fill with every field of the documented TradeResource."""
     return {"price": w16(price), "quantity": w16(qty), "fee": w16(fee), "feeCoefficient": "0.0035",
+            "makerFeeCoefficient": "0.0035", "takerFeeCoefficient": "0.0035",
             "feeAsset": asset, "timestamp": "2026-10-22T08:00:01Z", "symbol": symbol,
             "sum": w16(D(price) * D(qty)), "isBuyer": True}
 
 
 def order_json(cid=CID, *, symbol=SYM, side="BUY", type_="LIMIT", qty="0.01", price="60010",
                status="NEW", fills=(), **extra):
+    """An order with every field of the documented OrderResource. Its stop price is under
+    ``stopPrice`` (the RESPONSE spelling; the create request uses ``stop_Price``)."""
     fills = [fill_json(*f) if isinstance(f, tuple) else f for f in fills]
     executed = sum((D(f["quantity"]) for f in fills), D(0))
     executed_sum = sum((D(f["price"]) * D(f["quantity"]) for f in fills), D(0))
     o = {"symbol": symbol, "type": type_, "side": side, "clientOrderId": cid,
-         "transactTime": 1760000000, "price": w16(price) if price is not None else "0",
+         "transactTime": 1760000000, "created_at": "2025-10-09T08:53:20Z",
+         "updated_at": "2025-10-09T08:53:20Z", "price": w16(price) if price is not None else "0",
          "origQty": w16(qty), "executedSum": w16(executed_sum), "executedQty": w16(executed),
          "executedPrice": w16(executed_sum / executed if executed else 0),
+         "fee": w16(sum((D(f["fee"]) for f in fills), D(0))),
          "sum": w16(D(qty) * D(price or 0)), "executedPercent": int(executed / D(qty) * 100),
+         "stopPrice": None, "stopPriceCondition": None,
          "status": status, "active": status in ("NEW", "PARTIALLY_FILLED"), "fills": fills}
     o.update(extra)
     return o
@@ -206,13 +219,27 @@ def test_stop_orders_are_refused_unless_enabled_then_use_the_stop_field(armed):
     with pytest.raises(OrderRejected, match="stop orders are disabled"):
         place(broker(t, armed), type=OrderType.STOP_LIMIT, price=D("59000"), stop_price=D("59100"))
     assert t.calls == []
-    t = Scripted(ok(order_json(type_="STOP_LIMIT", price="59000", stop_Price=w16("59100")), 201))
+    t = Scripted(ok(order_json(type_="STOP_LIMIT", price="59000", stopPrice=w16("59100")), 201))
     order = place(broker(t, armed, allow_stop_orders=True), type=OrderType.STOP_LIMIT,
                   price=D("59000"), stop_price=D("59100"))
     body = json.loads(t.calls[0].body)
-    assert WP.STOP_PRICE_FIELD == "stop_Price"          # spelling UNVERIFIED (see module docstring)
+    assert WP.STOP_PRICE_FIELD == "stop_Price"              # documented request spelling
+    assert WP.STOP_PRICE_RESPONSE_FIELD == "stopPrice"      # documented response spelling
     assert body["stop_Price"] == "59100" and body["type"] == "STOP_LIMIT" and body["price"] == "59000"
+    assert "stopPrice" not in body
     assert order.stop_price == D("59100")
+
+
+def test_response_stop_price_is_read_only_from_the_documented_stopPrice_field():
+    stop = order_json(type_="STOP_MARKET", price=None, stopPrice=w16("59100"))
+    assert parse_order(stop, now=0.0).stop_price == D("59100")
+    request_spelling = order_json(type_="STOP_MARKET", price=None, stop_Price=w16("59100"))
+    assert parse_order(request_spelling, now=0.0).stop_price is None
+    for value in ("0", "-1", "x", 59100.5):                 # a stop order needs a positive stop
+        with pytest.raises(BrokerDataError):
+            parse_order(order_json(type_="STOP_LIMIT", price="59000", stopPrice=value), now=0.0)
+    limit = order_json(stopPrice="0", stopPriceCondition="")    # ignored on a non-stop order
+    assert parse_order(limit, now=0.0).stop_price is None
 
 
 def test_non_stop_order_never_sends_a_stop_field(armed):
@@ -250,7 +277,27 @@ def test_get_order_is_a_get_with_the_read_key(armed):
     broker(t, armed).get_order(CID)
     c = t.calls[0]
     assert (c.method, c.url, c.body) == ("GET", f"{BASE}/v1/account/orders/{CID}", None)
-    assert c.headers["X-API-Key"] == FAKE_READ_KEY and "Content-Type" not in c.headers
+    assert c.headers["X-API-Key"] == FAKE_READ_KEY
+
+
+def test_every_private_request_sends_the_documented_json_content_type(armed):
+    """The docs ask for Content-Type: application/json on every request, bodiless ones too."""
+    t = Scripted(ok(order_json(), 201), ok(order_json()), ok({"orders": []}),
+                 ok({"balances": {}}), ok({SYM: {"makerFeeRate": "0.002", "takerFeeRate": "0.002"}}),
+                 ok({}), ok(order_json(status="CANCELED")))
+    b = broker(t, armed, sub_account=Secret(FAKE_SUB))
+    place(b)
+    b.get_order(CID)
+    b.open_orders()
+    b.balances()
+    b.fee_rates()
+    b.cancel_order(CID)
+    assert [c.method for c in t.calls] == ["POST"] + ["GET"] * 4 + ["DELETE", "GET"]
+    for c in t.calls:
+        assert c.headers["Content-Type"] == "application/json"
+        assert c.headers["Accept"] == "application/json"
+        assert c.headers["sub-account-client-id"] == FAKE_SUB
+        assert (c.body is None) is (c.method != "POST")
 
 
 def test_reads_fall_back_to_the_trade_key_only_without_a_read_key(armed):
@@ -319,18 +366,26 @@ def test_open_orders_skips_only_unparseable_orders_that_are_not_ours(armed, capl
             broker(Scripted(ok({"orders": bad_rows})), armed).open_orders()
 
 
+def balance_row(asset, value, locked):
+    """A balance row with every field of the documented AccountBalanceItem (8-decimal strings)."""
+    return {"asset": asset, "asset_png_icon": "-", "asset_svg_icon": "-", "faName": asset.lower(),
+            "fiat": False, "value": value, "locked": locked, "is_dust": False,
+            "is_digital_gold": False}
+
+
 def test_balances_and_fee_requests_and_parsing(armed):
-    balances = {"balances": {
-        "USDT": {"asset": "USDT", "faName": "tether", "fiat": False,
-                 "value": "1250.5000000000000000", "locked": "250.5000000000000000"},
-        "BTC": {"asset": "BTC", "faName": "bitcoin", "fiat": False,
-                "value": "0.0100000000000000", "locked": "0"}}}
-    fees = {"BTCUSDT": {"makerFeeRate": "0.0020000000", "takerFeeRate": "0.0025000000",
-                        "recent_days_sum": 0},
-            "ETHUSDT": {"makerFeeRate": "0.0030", "takerFeeRate": "0.0035", "recent_days_sum": "1"}}
+    balances = {"balances": {"USDT": balance_row("USDT", "1250.50000000", "250.50000000"),
+                             "BTC": balance_row("BTC", "0.01000000", "0.00000000"),
+                             "1BBABYDOGE": balance_row("1BBABYDOGE", "13.97200000", "0.00000000")}}
+    # documented FeeItem: rates as 8-decimal fraction strings, recent_days_sum a JSON number
+    fees = {"BTCUSDT": {"makerFeeRate": "0.00200000", "takerFeeRate": "0.00250000",
+                        "recent_days_sum": 250000000.0},
+            "ETHUSDT": {"makerFeeRate": "0.00300000", "takerFeeRate": "0.00350000",
+                        "recent_days_sum": 0}}
     t = Scripted(ok(balances), ok(fees), ok(fees), ok(fees))
     b = broker(t, armed)
-    assert b.balances() == {"USDT": Balance(D("1000"), D("250.5")), "BTC": Balance(D("0.01"), D(0))}
+    assert b.balances() == {"USDT": Balance(D("1000"), D("250.5")), "BTC": Balance(D("0.01"), D(0)),
+                            "1BBABYDOGE": Balance(D("13.972"), D(0))}
     assert b.fee_rates() == FeeRates(D("0.003"), D("0.0035"))           # highest of any market
     assert b.fee_rates(SYM) == FeeRates(D("0.002"), D("0.0025"))
     with pytest.raises(BrokerDataError):
@@ -475,6 +530,25 @@ def test_status_mapping_table_and_conservative_unknowns(raw_status, fills, expec
                                   "EXPIRED", "REJECTED"}
 
 
+@pytest.mark.parametrize("raw_status", ["FINISHED", "finished"])
+def test_prose_only_finished_status_is_filled_only_when_the_fills_are_complete(raw_status, caplog):
+    """The cancel page names FINISHED as 'fully executed' (prose only, no enum): it finalises an
+    order only when the fills cover origQty; otherwise it is an unknown status (open, logged), so
+    partial fills are still booked and nothing that might trade again is finalised."""
+    caplog.set_level(logging.WARNING, logger="wallexbot")
+    full = order_json(status=raw_status, fills=[("60010", "0.006", "0.000021", "BTC"),
+                                                ("60005", "0.004", "0.000014", "BTC")])
+    assert parse_order(full, now=0.0).status is OrderStatus.FILLED
+    assert "unknown order status" not in caplog.text
+    part = parse_order(order_json(status=raw_status, fills=[("60010", "0.004", "0.000014", "BTC")]),
+                       now=0.0)
+    assert (part.status, part.filled_qty) == (OrderStatus.PARTIALLY_FILLED, D("0.004"))
+    assert parse_order(order_json(status=raw_status), now=0.0).status is OrderStatus.NEW
+    assert caplog.text.count("unknown order status") == 2
+    with pytest.raises(BrokerDataError, match="executedQty"):     # cross-check still runs first
+        parse_order({**full, "executedQty": w16("0.004")}, now=0.0)
+
+
 BALANCE_MUTATIONS = [
     lambda r: r["balances"]["USDT"].pop("value"), lambda r: r["balances"]["USDT"].pop("locked"),
     lambda r: r["balances"]["USDT"].__setitem__("locked", "2000"),
@@ -488,7 +562,7 @@ BALANCE_MUTATIONS = [
 
 @pytest.mark.parametrize("i", range(len(BALANCE_MUTATIONS)))
 def test_bad_balances_fail_closed(i):
-    result = {"balances": {"USDT": {"asset": "USDT", "value": "1000", "locked": "0"}}}
+    result = {"balances": {"USDT": balance_row("USDT", "1000.00000000", "0.00000000")}}
     BALANCE_MUTATIONS[i](result)
     with pytest.raises(BrokerDataError):
         parse_balances(result)
@@ -865,10 +939,12 @@ def test_reader_class_only_ever_sends_get():
 
 # ----------------------------------------------------------------------------- OMS integration
 class FakeWallex:
-    """Behaves like the ASSUMED Wallex private API (plus public depth) behind the transport
-    interface: client_id is unique (a second create is refused with 409 and creates nothing),
-    fills[] are cumulative, unknown orders are 404 + success:false, BUY fees are paid in the base
-    asset and SELL fees in the quote asset, and only the trade key may create or cancel."""
+    """Wallex's private API (plus public depth) behind the transport interface: as DOCUMENTED
+    where the public docs say (paths, 201 on create, the order object, a reused client_id creates
+    nothing, 404 + success:false for an unknown order on GET, openOrders paged by page/per_page)
+    and as ASSUMED elsewhere (409 for that reused client_id, the "orders" key of openOrders,
+    fills[] cumulative, BUY fees in the base asset and SELL fees in the quote asset, 403 when the
+    read key tries to trade)."""
 
     FILL_PART = {"fill": D(1), "partial": D("0.5"), "rest": D(0), "timeout_after_accept": D(1),
                  "502_after_accept": D(1)}
@@ -916,10 +992,11 @@ class FakeWallex:
         if method == "GET" and path == "/v1/account/openOrders":
             page, per = int(query["page"][0]), int(query["per_page"][0])
             rows = [o for o in self.orders.values() if o["status"] in ("NEW", "PARTIALLY_FILLED")]
-            return ok({"orders": rows[(page - 1) * per: page * per]})
+            return ok({"orders": rows[(page - 1) * per: page * per]},
+                      info={"page": page, "per_page": per, "count": len(rows)})
         if method == "GET" and path == "/v1/account/balances":
-            return ok({"balances": {"USDT": {"asset": "USDT", "value": w16(10000), "locked": "0"},
-                                    "BTC": {"asset": "BTC", "value": "0", "locked": "0"}}})
+            return ok({"balances": {"USDT": balance_row("USDT", "10000.00000000", "0.00000000"),
+                                    "BTC": balance_row("BTC", "0.00000000", "0.00000000")}})
         return raw(404, b"<html>404 Not Found</html>")
 
     def create(self, req):
@@ -948,8 +1025,10 @@ class FakeWallex:
         fee, asset = (qty * self.rate, "BTC") if buy else (price * qty * self.rate, "USDT")
         o["fills"].append(fill_json(price, qty, fee, asset, o["symbol"]))
         executed = D(o["executedQty"]) + qty
-        o.update(executedQty=w16(executed),
-                 executedSum=w16(D(o["executedSum"]) + price * qty),
+        executed_sum = D(o["executedSum"]) + price * qty
+        o.update(executedQty=w16(executed), executedSum=w16(executed_sum),
+                 executedPrice=w16(executed_sum / executed), fee=w16(D(o["fee"]) + fee),
+                 executedPercent=int(executed / D(o["origQty"]) * 100),
                  status="FILLED" if executed == D(o["origQty"]) else "PARTIALLY_FILLED")
         o["active"] = o["status"] != "FILLED"
 

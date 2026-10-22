@@ -27,20 +27,31 @@ fund-movement paths are refused there). The key travels only in the X-API-Key he
 URL or body. Every exception message and log line here goes through redact(), and transport
 exceptions are summarised, never chained, so their arguments are not carried along.
 
-UNVERIFIED Wallex assumptions (no private request has been made; see WALLEX_INTEGRATION.md):
-  * paths: POST ORDERS_PATH, GET and DELETE ORDERS_PATH/{client_id}, GET OPEN_ORDERS_PATH,
-    BALANCES_PATH and FEE_PATH (constants below);
-  * envelope {"success": true, "result": ...}; errors {"success": false, "message": ...};
-  * create body: symbol, side BUY|SELL, type LIMIT|MARKET|STOP_LIMIT|STOP_MARKET, price,
-    quantity (decimal strings), client_id, and STOP_PRICE_FIELD for stops (spelling unverified,
-    which is why stop orders are refused unless allow_stop_orders=True);
-  * order object: clientOrderId, symbol, side, type, origQty, price, status, fills[] of
-    {price, quantity, fee, feeAsset}; executedQty (optional cross-check), transactTime (optional);
-  * status values: STATUS_MAP below; any other value => a conservative OPEN state, logged;
-  * balances: result.balances = {ASSET: {value (TOTAL), locked}}; free = value - locked;
-  * fee: result = {MARKET: {makerFeeRate, takerFeeRate}} as fractions (0.0025 = 0.25 %);
-  * openOrders: result.orders = [...], paged with PAGE_PARAM / PER_PAGE_PARAM;
-  * a 409, or a 4xx body mentioning a duplicate or the client id, means "client_id already used".
+Wallex API shapes. No private request has ever been made, so nothing here is tested against the
+live API. DOCUMENTED = stated in Wallex's public developer docs or Swagger files (retrieved
+2026-10-22; sources and excerpts in docs/WALLEX_INTEGRATION.md):
+  * the paths (constants below); headers x-api-key and sub-account-client-id; Content-Type:
+    application/json on every request; envelope {success, message, result}; error body
+    {success: false, code, message, result: {field: [messages]}};
+  * create body of strings: symbol, side BUY|SELL, type LIMIT|MARKET|STOP_LIMIT|STOP_MARKET,
+    price, quantity, client_id (letters, digits, underscore; a reused one creates no order), and
+    STOP_PRICE_FIELD only for stops; 201 on success; at most 20 creates per 10 s;
+  * order object: clientOrderId, symbol, side, type, origQty, price, status, executedQty,
+    transactTime, STOP_PRICE_RESPONSE_FIELD (spelled differently from the request field!) and
+    fills[] of {price, quantity, fee, feeAsset, symbol}; GET of an unknown client_id is a 404;
+  * openOrders is paged with PAGE_PARAM / PER_PAGE_PARAM; balances: result.balances =
+    {ASSET: {value, locked}}; fee: result = {MARKET: {makerFeeRate, takerFeeRate}}, fractions
+    in the docs' example ("0.00200000").
+UNVERIFIED (the docs are silent; each choice below fails closed or reconciles):
+  * status values beyond the examples NEW / FILLED / CANCELED and the prose-only FINISHED: see
+    STATUS_MAP and _FILLED_WHEN_COMPLETE; any other value => a conservative OPEN state, logged;
+  * the key under which openOrders lists orders (assumed "orders"; the docs show placeholders),
+    and whether a per_page of PER_PAGE is honoured there;
+  * balance ``value`` read as the TOTAL (free = value - locked), the conservative reading;
+  * stop orders: refused unless allow_stop_orders=True (trigger and locking behaviour unknown);
+  * HTTP statuses for a duplicate client_id, insufficient balance, rate limiting or a missing
+    permission: a 409, or a 4xx body mentioning a duplicate or the client id, is read as
+    "client_id already used" (ambiguous); 429 => RateLimited; 403 => AuthRejected.
 """
 from __future__ import annotations
 
@@ -79,16 +90,18 @@ OPEN_ORDERS_PATH = "/v1/account/openOrders"
 BALANCES_PATH = "/v1/account/balances"
 FEE_PATH = "/v1/account/fee"
 ENDPOINT_PATHS = frozenset({ORDERS_PATH, OPEN_ORDERS_PATH, BALANCES_PATH, FEE_PATH})
-STOP_PRICE_FIELD = "stop_Price"             # UNVERIFIED spelling (task spec; not in the docs)
-PAGE_PARAM, PER_PAGE_PARAM = "page", "per_page"   # UNVERIFIED openOrders paging parameters
-PER_PAGE, MAX_PAGES = 100, 20
+STOP_PRICE_FIELD = "stop_Price"             # documented REQUEST field (create body)
+STOP_PRICE_RESPONSE_FIELD = "stopPrice"     # documented RESPONSE field (order object)
+PAGE_PARAM, PER_PAGE_PARAM = "page", "per_page"   # documented openOrders query parameters
+PER_PAGE, MAX_PAGES = 100, 20               # 100 = the documented max of the order-list endpoint
 MAX_BODY_BYTES = 4 * 1024 * 1024
 MAX_FILLS = 1000
 USER_AGENT = "wallexbot/0.1"
 
-# UNVERIFIED: Wallex's order-status enum is not publicly documented. Values not listed here map to
-# a conservative OPEN state (NEW, or PARTIALLY_FILLED once fills exist) and are logged, so the OMS
-# keeps reconciling instead of finalising an order that may still trade.
+# UNVERIFIED: Wallex publishes no order-status enum; its docs show only NEW, FILLED and CANCELED as
+# examples. Values not listed here map to a conservative OPEN state (NEW, or PARTIALLY_FILLED once
+# fills exist) and are logged, so the OMS keeps reconciling instead of finalising an order that
+# may still trade.
 STATUS_MAP: Mapping[str, OrderStatus] = {
     "NEW": OrderStatus.NEW,
     "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
@@ -98,6 +111,11 @@ STATUS_MAP: Mapping[str, OrderStatus] = {
     "EXPIRED": OrderStatus.CANCELED,       # terminal; any fills are kept
     "REJECTED": OrderStatus.REJECTED,
 }
+# Named only in prose on the cancel page ("an order can be cancelled until it is FINISHED, i.e.
+# while it is not fully executed"). Read as FILLED only when the fills add up to origQty; any
+# other FINISHED order takes the unknown-status path above (open, logged), so its fills are still
+# booked and nothing that could trade again is finalised.
+_FILLED_WHEN_COMPLETE = frozenset({"FINISHED"})
 _SIDES = {"BUY": Side.BUY, "SELL": Side.SELL}
 _TYPES = {t.value: t for t in OrderType}
 _PRICED = frozenset({OrderType.LIMIT, OrderType.STOP_LIMIT})
@@ -196,12 +214,13 @@ def _url(path: str, params: Mapping[str, object] | None = None) -> str:
     return assert_host_allowed(BASE_URL + path + query)     # raises before any I/O
 
 
-def _headers(key: Secret, sub_account: str | Secret | None, *, json_body: bool = False) -> dict:
+def _headers(key: Secret, sub_account: str | Secret | None) -> dict:
+    """Auth headers plus the JSON headers. Wallex's docs ask for Content-Type: application/json
+    on EVERY request, so it is sent on GET and DELETE (which have no body) too."""
     headers = build_auth_headers(key, sub_account)          # AuthHeaders: its repr is redacted
     headers["Accept"] = "application/json"
+    headers["Content-Type"] = "application/json"
     headers["User-Agent"] = USER_AGENT
-    if json_body:
-        headers["Content-Type"] = "application/json"
     return headers
 
 
@@ -401,8 +420,11 @@ def _epoch(value: object) -> float | None:
     return ts if 10 ** 9 <= ts <= 10 ** 11 else None
 
 
-def _map_status(raw: str, filled_qty: Decimal, what: str) -> OrderStatus:
-    mapped = STATUS_MAP.get(raw.upper())
+def _map_status(raw: str, filled_qty: Decimal, quantity: Decimal, what: str) -> OrderStatus:
+    key = raw.upper()
+    mapped = STATUS_MAP.get(key)
+    if mapped is None and key in _FILLED_WHEN_COMPLETE and filled_qty == quantity:
+        mapped = OrderStatus.FILLED           # fully executed: nothing left that could trade
     if mapped is None:
         mapped = OrderStatus.PARTIALLY_FILLED if filled_qty > 0 else OrderStatus.NEW
         log.warning("%s", _m(f"{what}: unknown order status {_clip(repr(raw), 40)}; treated as "
@@ -423,7 +445,7 @@ def parse_order(obj: object, *, now: float, expect_client_id: str | None = None)
     quantity = _dec(_req(obj, "origQty", what), f"{what} origQty", positive=True)
     price = _dec(_req(obj, "price", what), f"{what} price", positive=True) if otype in _PRICED \
         else None
-    stop_raw = obj.get(STOP_PRICE_FIELD) if otype in _STOPS else None
+    stop_raw = obj.get(STOP_PRICE_RESPONSE_FIELD) if otype in _STOPS else None
     stop = None if stop_raw is None else _dec(stop_raw, f"{what} stop price", positive=True)
     raw_status = _req(obj, "status", what)
     if type(raw_status) is not str:
@@ -457,7 +479,7 @@ def parse_order(obj: object, *, now: float, expect_client_id: str | None = None)
     if obj.get("executedQty") is not None \
             and _dec(obj["executedQty"], f"{what} executedQty") != filled_qty:
         raise BrokerDataError(f"{what}: executedQty differs from the sum of fills (fills incomplete)")
-    status = _map_status(raw_status, filled_qty, what)
+    status = _map_status(raw_status, filled_qty, quantity, what)
     if status is OrderStatus.FILLED and filled_qty != quantity:
         raise BrokerDataError(f"{what}: FILLED but the fills do not add up to origQty (incomplete)")
     created = _epoch(obj.get("transactTime"))
@@ -726,7 +748,7 @@ class WallexBroker:
             raise RateLimited("local order-create budget exhausted; nothing was sent")
         url = _url(ORDERS_PATH)
         data = json.dumps(sent, separators=(",", ":")).encode("ascii")
-        headers = _headers(key, self._sub_account, json_body=True)
+        headers = _headers(key, self._sub_account)
         what = f"order create {sent['client_id']}"
         failure = None
         try:
@@ -748,8 +770,8 @@ class WallexBroker:
         if not isinstance(side, Side) or not isinstance(otype, OrderType):
             raise OrderRejected("side and type must be Side and OrderType members; nothing was sent")
         if otype in _STOPS and not self._allow_stop:
-            raise OrderRejected("stop orders are disabled: Wallex's stop-order fields are "
-                                "unverified (allow_stop_orders=False); nothing was sent")
+            raise OrderRejected("stop orders are disabled (allow_stop_orders=False): their status "
+                                "and balance locking on Wallex are unverified; nothing was sent")
         body = {"symbol": sym, "side": side.value, "type": otype.value,
                 "quantity": _wire(quantity, "quantity"), "client_id": cid}
         if otype in _PRICED:
