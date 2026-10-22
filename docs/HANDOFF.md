@@ -17,7 +17,7 @@ loses money on every train/validation configuration ([reports/README.md](../repo
 
 | Check | Result |
 |---|---|
-| `pytest -q` | 2015 passed (~2.5 min; 1948 at the first handoff) |
+| `pytest -q` | 2031 passed (~2.5 min; 1948 at the first handoff) |
 | `ruff check --select F,E9` (src, tests, deploy) | clean (run in a throwaway venv; ruff is not a project dependency) |
 | `mypy --ignore-missing-imports src` | **113 findings in 24 files**, informational. The project has no type-check config and was never type-clean; not addressed |
 | `pip wheel .` / non-editable install | wheel contains `wallexbot/default_config.yaml` (inspected by `tests/test_packaging.py`); installed into a fresh venv **outside the repo** it ran `demo`, loaded the default config and refused `bot --mode live` (exit 2) |
@@ -25,7 +25,7 @@ loses money on every train/validation configuration ([reports/README.md](../repo
 | `docker compose` | `config` ok; `up -d` of the bot service healthy, `stop` exit 0, `down -v` clean. **`no-new-privileges:true` fails on the tested snap-Docker host for every image**, so compose was run with `security_opt` reset (docs/DEPLOY.md) |
 | systemd units | `systemd-analyze verify` plus `systemd-run --user` transient units with the supported sandbox properties: bot ran, health ok, `systemctl stop` graceful; recorder ran. This found a real bug (`SystemCallFilter=~@resources` killed numpy/pandas with SIGSYS), fixed. The system units were not installed |
 | Offline commands in README/DEMO | `demo`, `bot --mode mock --replay-from data/history` (strict and demo), `guardian --demo-db` re-run and match the docs |
-| Live shadow runs on the public API | 12 min demo profile, 2 h strict profile and a 2 h+ demo-profile soak (earlier code): 0 guardian failures, kill switch never engaged, healthcheck ok; the soak absorbed transient market-data failures (the outage-degradation fix was written because of them). No run produced a signal, so **no live fill path was exercised in a live loop**. Substitute check: a real recorded BTCUSDT book fed to `ShadowBroker` gives a fill whose VWAP, cost and fee match a hand calculation exactly |
+| Live shadow runs on the public API | 12 min demo profile, 2 h strict profile and a 2 h+ demo-profile soak (earlier code): 0 guardian failures, kill switch never engaged, healthcheck ok; the soak absorbed transient market-data failures (the outage-degradation fix was written because of them). No strategy run produced a signal. The gap is closed by `deploy/smoke_shadow_fill.py` (`make smoke`, docs/DEPLOY.md): one FORCED test signal (not a strategy result) through the real shadow stack on the live BTCUSDT book gave a full round trip, entry fill, exit fill, realized P&L and fees in the audit DB, all invariants passed (first live run: 85 s, slippage vs mid 3.3 bps entry / 9.0 bps exit, net -1.31 USDT on ~250 USDT notional at the 0.2 % fee). Substitute check: a real recorded BTCUSDT book fed to `ShadowBroker` gives a fill whose VWAP, cost and fee match a hand calculation exactly |
 
 ## How to resume
 
