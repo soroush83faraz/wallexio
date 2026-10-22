@@ -9,6 +9,7 @@ DB       ?= $(RUN_DIR)/bot.db
 BALANCE  ?= 1000
 INTERVAL ?= 12
 IMAGE    ?= wallexbot:shadow
+PROFILE  ?= strict
 
 .PHONY: help venv test demo backtest shadow guardian docker-build docker-up docker-down healthcheck clean
 
@@ -24,11 +25,12 @@ venv: $(PY)
 test: $(PY)
 	$(PY) -m pytest -q
 
-# Offline: scripted mock round trip, then three guardian ticks on a mock broker. No network, no keys.
+# Offline: scripted mock round trip, then three ticks of the standalone guardian DEMO on its own
+# throwaway database and mock broker. No network, no keys.
 demo: $(PY)
 	@mkdir -p $(RUN_DIR)
 	$(PY) -m wallexbot demo --db $(RUN_DIR)/demo.db
-	$(PY) -m wallexbot guardian --db $(RUN_DIR)/demo_guardian.db --mode mock --ticks 3 --interval 1
+	$(PY) -m wallexbot guardian --db $(RUN_DIR)/demo_guardian.db --mode mock --demo-db --ticks 3 --interval 1
 
 # Exploratory grid on train+validation of local 1m history (needs data/history, see docs/BACKTEST.md).
 backtest: $(PY)
@@ -36,14 +38,15 @@ backtest: $(PY)
 	$(PY) -m wallexbot backtest
 
 # Local shadow run: public GETs to api.wallex.ir only, simulated fills, no orders sent. Ctrl-C stops it.
+# The guardian runs in-process. PROFILE=demo selects the EXERCISE profile (no edge claimed).
 shadow: $(PY)
 	@mkdir -p $(RUN_DIR)
-	$(PY) -m wallexbot bot --db $(DB) --mode shadow --balance $(BALANCE) --interval-s $(INTERVAL)
+	$(PY) -m wallexbot bot --db $(DB) --mode shadow --balance $(BALANCE) --interval-s $(INTERVAL) --profile $(PROFILE)
 
-# Second terminal, same DB. Exactly one guardian per database.
+# Standalone guardian DEMO only (own mock broker, own throwaway DB). It refuses a bot's database.
 guardian: $(PY)
 	@mkdir -p $(RUN_DIR)
-	$(PY) -m wallexbot guardian --db $(DB) --mode shadow
+	$(PY) -m wallexbot guardian --db $(RUN_DIR)/demo_guardian.db --mode mock --demo-db --ticks 3 --interval 1
 
 docker-build:
 	docker build -t $(IMAGE) .

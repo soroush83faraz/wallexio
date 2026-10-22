@@ -1,5 +1,5 @@
 [Unit]
-Description=wallexbot shadow bot (simulated fills, no orders sent)
+Description=wallexbot shadow bot (simulated fills, no orders sent; guardian runs in-process)
 Documentation=file:///opt/wallexbot/docs/DEPLOY.md
 Wants=network-online.target
 After=network-online.target
@@ -13,6 +13,7 @@ Group=wallexbot
 WorkingDirectory=/opt/wallexbot
 EnvironmentFile=/etc/wallexbot/env
 ExecStart=/opt/wallexbot/.venv/bin/python -m wallexbot bot --db /var/lib/wallexbot/bot.db --mode shadow --balance 1000 --interval-s 12
+# The guardian runs inside this process (own DB connection, same shadow broker); there is no guardian unit.
 # SIGTERM: the bot finishes its current tick, then exits 0.
 KillSignal=SIGTERM
 TimeoutStartSec=60

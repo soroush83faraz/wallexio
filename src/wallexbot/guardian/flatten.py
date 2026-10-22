@@ -18,7 +18,12 @@ Invariants (why this can never double-sell or run away):
 - No resubmission. A new exit is placed only when every reduce-only SELL intent for the symbol
   that could still sell (this episode's own, or anyone's in unknown_pending / risk_approved) is
   terminal. An ambiguous submit stays unknown_pending until oms.reconcile() resolves it; we wait
-  for that (bounded), we never send a replacement for it.
+  for that (bounded), we never send a replacement for it. A SELL still PROPOSED and younger than
+  oms.PROPOSED_COMMIT_WINDOW_S (30 s; another actor, e.g. the bot's exit, is between append_intent
+  and its risk transaction) is ambiguous too: we wait for it the same way. An older PROPOSED is a
+  crash leftover that never reached the broker: it neither blocks nor counts as committed. The OMS
+  risk transaction is the second layer: it counts young PROPOSED SELLs inserted earlier as
+  committed, so even a racing pair of exits cannot both be approved for the full position.
 - Deterministic identity. signal_id = gflat:<UTC day>-<cause>:<symbol>:<n>, where n is the number
   of intents this episode already holds for the symbol (durable state). With the same durable
   state a re-run builds the same client_id, which the OMS refuses to send twice.
@@ -42,7 +47,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Callable, Sequence
 
-from wallexbot.oms import OPEN_INTENT_STATES
+from wallexbot.dust import is_dust, min_notional_for
+from wallexbot.oms import OPEN_INTENT_STATES, is_young_proposed
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.store import IntentRecord
 from wallexbot.types import (TERMINAL_STATES, IntentState, OrderIntent, OrderType, Side, SymbolRules,
@@ -77,7 +83,7 @@ class FlattenConfig:
     # (otherwise their locked base could not be sold, or an unlocked stop could fire afterwards).
     cancel_protective_stops: bool = True
     dry_run: bool = False                           # shadow mode: plan and audit, no broker writes
-    dust_notional: Decimal | None = None            # None: rules.min_notional or risk.min_notional
+    dust_notional: Decimal | None = None            # None: dust.min_notional_for(rules, risk config)
 
     def __post_init__(self) -> None:
         """Bounded work depends on these: refuse configs that would make a wait unbounded."""
@@ -295,12 +301,18 @@ class _Flattener:
                                 for r in mine)
 
     def _blocking_exits(self, sym: str) -> list[IntentRecord]:
-        """Reduce-only SELLs that could still sell base we are about to size: ours while open,
-        anyone's while ambiguous. Others' confirmed resting exits hold locked base, which the
-        confirmed free balance already excludes."""
-        return [r for r in self.store.intents_in_states(OPEN_INTENT_STATES)
+        """SELLs that could still sell base we are about to size: ours while open, anyone's while
+        ambiguous (unknown_pending, risk_approved, or PROPOSED younger than the commit window).
+        Others' confirmed resting exits hold locked base, which the confirmed free balance already
+        excludes."""
+        now = self._now()
+        return [r for r in self.store.intents_in_states(OPEN_INTENT_STATES | {S.PROPOSED})
                 if r.intent.symbol == sym and r.intent.side is Side.SELL
-                and (is_guardian_intent(r) or r.state in _AMBIGUOUS)]
+                and (self._ambiguous(r, now) or (r.state in OPEN_INTENT_STATES and is_guardian_intent(r)))]
+
+    @staticmethod
+    def _ambiguous(rec: IntentRecord, now: float) -> bool:
+        return rec.state in _AMBIGUOUS or is_young_proposed(rec, now)
 
     def _snapshot(self, sym: str) -> dict[str, Decimal] | None:
         r = self.rules[sym]
@@ -311,7 +323,7 @@ class _Flattener:
             return None
         ledger = self.oms.positions().get(sym)
         ledger_qty = ledger.quantity if ledger is not None else _ZERO
-        committed = sum((i.quantity for i in self.oms.open_intents()
+        committed = sum((i.quantity for i in self.oms.committed_intents(self._now())
                          if i.symbol == sym and i.side is Side.SELL), _ZERO)
         try:
             mark = self.broker.quote(sym).bid
@@ -323,21 +335,17 @@ class _Flattener:
                 "sellable": round_down(max(min(free, ledger_qty - committed), _ZERO), r.amount_precision)}
 
     def _dust(self, sym: str, qty: Decimal, mark: Decimal) -> bool:
-        r = self.rules[sym]
-        if round_down(qty, r.amount_precision) <= 0:
-            return True
-        return mark > 0 and qty * mark < self._min_notional(sym)
+        """The shared dust rule (wallexbot/dust.py)."""
+        return is_dust(qty, self.rules[sym], mark, self._min_notional(sym))
 
     def _min_notional(self, sym: str) -> Decimal:
         if self.cfg.dust_notional is not None:
             return self.cfg.dust_notional
-        r = self.rules[sym]
-        if r.min_notional is not None:
-            return r.min_notional
         try:
-            return self.oms.risk.config.risk.min_notional
+            return min_notional_for(self.rules[sym], self.oms.risk.config.risk)
         except Exception:
-            return _ZERO
+            r = self.rules[sym]
+            return r.min_notional if r.min_notional is not None else _ZERO
 
     def _final_status(self, sym: str, snap: dict[str, Decimal], out: SymbolOutcome) -> SymbolOutcome | None:
         out.remaining = snap["total"]
@@ -403,26 +411,30 @@ class _Flattener:
     def _settle(self, rec: IntentRecord) -> bool:
         """Bring one blocking exit to a terminal state within bounded time. True iff terminal."""
         cid = rec.intent.client_id
-        if rec.state in _AMBIGUOUS:
-            rec = self._wait(cid, self._now() + self.unknown_timeout, lambda st: st not in _AMBIGUOUS)
+        if self._ambiguous(rec, self._now()):
+            rec = self._wait(cid, self._now() + self.unknown_timeout,
+                             lambda r: not self._ambiguous(r, self._now()))
         if rec.state in _LIVE and is_guardian_intent(rec):
             timeout = self.cfg.limit_timeout_s if rec.intent.type is OrderType.LIMIT else self.cfg.market_timeout_s
-            rec = self._wait(cid, rec.created_at + timeout, lambda st: st in TERMINAL_STATES)
+            rec = self._wait(cid, rec.created_at + timeout, lambda r: r.state in TERMINAL_STATES)
             if rec.state in _LIVE:  # confirmed live at the exchange and timed out: cancel, never resend
                 self._cancel(cid, "exit_timeout_cancel")
-                rec = self._wait(cid, self._now() + self.cfg.cancel_timeout_s, lambda st: st in TERMINAL_STATES)
+                rec = self._wait(cid, self._now() + self.cfg.cancel_timeout_s,
+                                 lambda r: r.state in TERMINAL_STATES)
         if rec.state in TERMINAL_STATES:
             return True
+        if rec.state is S.PROPOSED:   # aged out of the commit window: a leftover that never reached the broker
+            return not self._ambiguous(rec, self._now())
         # Someone else's exit that turned out to be a confirmed resting order no longer blocks:
         # its base is locked at the exchange, so the confirmed free balance excludes it.
         return not is_guardian_intent(rec) and rec.state not in _AMBIGUOUS
 
-    def _wait(self, cid: str, deadline: float, done: Callable[[IntentState], bool]) -> IntentRecord:
+    def _wait(self, cid: str, deadline: float, done: Callable[[IntentRecord], bool]) -> IntentRecord:
         start = self._now()
         max_polls = int(max(deadline - start, 0) / max(self.cfg.poll_interval_s, 1e-6)) + 2
         rec = self.store.get_intent(cid)
         for _ in range(max_polls):
-            if done(rec.state) or self._now() >= deadline:
+            if done(rec) or self._now() >= deadline:
                 return rec
             self._sleep()
             self._reconcile()

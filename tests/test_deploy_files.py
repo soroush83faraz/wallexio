@@ -84,14 +84,14 @@ def compose() -> dict:
 
 def test_compose_services_and_shadow_commands(compose):
     services = compose["services"]
-    assert {"bot", "guardian", "recorder"} <= set(services)
-    bot_cmd, guardian_cmd = services["bot"]["command"], services["guardian"]["command"]
-    assert bot_cmd[bot_cmd.index("--mode") + 1] == "shadow" and guardian_cmd[guardian_cmd.index("--mode") + 1] == "shadow"
-    assert guardian_cmd[3] == "guardian"
+    assert set(services) == {"bot", "recorder"}            # the guardian runs inside the bot process
+    bot_cmd = services["bot"]["command"]
+    assert bot_cmd[bot_cmd.index("--mode") + 1] == "shadow"
+    assert "--no-guardian" not in bot_cmd and "demo" not in bot_cmd   # in-process guardian on, strict profile
     for name, svc in services.items():
         assert "live" not in svc["command"], name
+        assert "guardian" not in svc["command"], name
     assert "recorder" in services["recorder"]["profiles"]
-    assert "guardian" in services["guardian"]["profiles"]      # opt-in: see docs/DEPLOY.md
 
 
 def test_compose_has_no_ports_and_is_hardened(compose):
@@ -113,7 +113,7 @@ def test_compose_has_no_ports_and_is_hardened(compose):
 # ---------------------------------------------------------------- systemd
 @pytest.mark.parametrize("unit", UNITS, ids=lambda p: p.name)
 def test_systemd_units_are_hardened(unit):
-    assert len(UNITS) == 3
+    assert len(UNITS) == 2
     text = unit.read_text()
     directives = {ln.split("=", 1)[0] for ln in text.splitlines() if "=" in ln and not ln.startswith("#")}
     for must in ("NoNewPrivileges=yes", "PrivateTmp=yes", "ProtectSystem=strict", "EnvironmentFile=/etc/wallexbot/env",
@@ -126,10 +126,10 @@ def test_systemd_units_are_hardened(unit):
     assert "ARM_LIVE" not in text and "API_KEY" not in text
 
 
-def test_guardian_unit_orders_after_bot():
-    text = (DEPLOY / "systemd" / "wallexbot-guardian.service").read_text()
-    assert "After=wallexbot-bot.service" in text and "PartOf=wallexbot-bot.service" in text
-    assert "guardian" in text.split("ExecStart=", 1)[1].splitlines()[0]
+def test_no_separate_guardian_unit_bot_runs_it_in_process():
+    assert not (DEPLOY / "systemd" / "wallexbot-guardian.service").exists()
+    exec_line = (DEPLOY / "systemd" / "wallexbot-bot.service").read_text().split("ExecStart=", 1)[1].splitlines()[0]
+    assert " bot " in exec_line and "--no-guardian" not in exec_line and "--profile demo" not in exec_line
 
 
 # ---------------------------------------------------------------- env templates
@@ -169,6 +169,9 @@ def test_makefile_has_required_targets():
                    "docker-down", "healthcheck", "clean"):
         assert re.search(rf"^{target}:", text, re.M), target
     assert "--mode live" not in text and "arm-live" not in text
+    for line in text.splitlines():           # the standalone guardian is a demo on its own DB only
+        if "wallexbot guardian" in line:
+            assert "--demo-db" in line and "$(DB)" not in line, line
 
 
 # ---------------------------------------------------------------- healthcheck
@@ -210,6 +213,33 @@ def test_stale_or_missing_heartbeat_is_unhealthy(store):
     assert _status(store, max_heartbeat_age_s=600.0)[0] == 0
     store.heartbeat("strategy", ts=NOW - 1)
     assert _status(store)[0] == 0
+
+
+def _startup(store, ts, profile="strict", guardian=True):
+    store.append_audit_event("bot", "startup", {"run": {"mode": "shadow", "profile": profile,
+                                                        "guardian": {"enabled": guardian, "interval_s": 15}},
+                                                "profile": profile}, ts=ts)
+
+
+def test_reports_profile_and_requires_guardian_heartbeat_when_enabled(store):
+    store.heartbeat("strategy", ts=NOW - 5)
+    _startup(store, NOW - 100)
+    code, st = _status(store)
+    assert code == 1 and st["guardian_enabled"] is True and "no guardian heartbeat" in st["problems"][0]
+    assert st["profile"] == "strict" and st["exercise_profile"] is False and st["mode"] == "shadow"
+    store.heartbeat("guardian", ts=NOW - 500)
+    assert "guardian heartbeat is 500s old" in _status(store)[1]["problems"][0]
+    store.heartbeat("guardian", ts=NOW - 3)
+    code, st = _status(store)
+    assert code == 0 and st["guardian_heartbeat_age_s"] == 3.0
+
+
+def test_demo_profile_is_reported_and_guardian_off_needs_no_heartbeat(store):
+    store.heartbeat("strategy", ts=NOW - 5)
+    _startup(store, NOW - 100, profile="demo", guardian=False)
+    code, st = _status(store)
+    assert code == 0 and st["profile"] == "demo" and st["exercise_profile"] is True
+    assert st["guardian_enabled"] is False and any("EXERCISE PROFILE" in w for w in st["warnings"])
 
 
 def test_other_components_heartbeat_does_not_count(store):

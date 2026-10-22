@@ -24,7 +24,7 @@ Status: **runnable.** `python -m wallexbot` has `demo`, `backtest`, `doctor`, `g
 .venv/bin/pytest -q
 ```
 
-Expected on the code at this commit: 1744 tests pass.
+Expected on the code at this commit: 1872 tests pass.
 
 ## Works now: the CLI (all offline unless noted)
 
@@ -48,11 +48,13 @@ Exploratory grid on train and validation only; the test segment is not evaluated
 .venv/bin/python -m wallexbot bot --db /tmp/shadow.db --mode shadow --balance 1000 --interval-s 12
 # optional log-only AI verdicts (needs ANTHROPIC_API_KEY, else it warns and runs without calls)
 .venv/bin/python -m wallexbot bot --db /tmp/shadow.db --mode shadow --advisor shadow
-# guardian (separate process, same DB)
-.venv/bin/python -m wallexbot guardian --db /tmp/shadow.db --mode shadow --ticks 3 --interval 1
+# EXERCISE profile (relaxed thresholds, no edge claimed, mock/shadow only): shows a full lifecycle
+.venv/bin/python -m wallexbot bot --db /tmp/demo_bot.db --mode mock --replay-from data/history --profile demo --max-ticks 4000
+# standalone guardian DEMO on its own mock broker and a NEW database (it refuses a bot's database)
+.venv/bin/python -m wallexbot guardian --db /tmp/g_demo.db --mode mock --demo-db --ticks 3 --interval 1
 ```
 
-The shadow journal is written next to the database (`shadow_journal.jsonl`, once an order exists). The first replay ticks may place no order: "no trades" is a valid outcome. `bot --mode live` and `--arm-live` are refused. In mock/replay runs the paper broker lives inside the bot process, so a separate guardian watches its own demo broker; the ledger, heartbeat and kill switch are shared through the database.
+The shadow journal is written next to the database (`shadow_journal.jsonl`, once an order exists). The first replay ticks may place no order: "no trades" is a valid outcome. `bot --mode live` and `--arm-live` are refused. The bot runs the guardian in-process on its own broker (`--no-guardian` disables it); the standalone `guardian` command is only a demo on its own mock broker.
 
 ## Works now: market-data download and recorder (public GETs, need network)
 

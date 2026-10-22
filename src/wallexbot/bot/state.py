@@ -155,13 +155,19 @@ class LoadedState:
 
 
 class BotState:
-    """Append-only persistence of the bot's state through Store.append_audit_event."""
+    """Append-only persistence of the bot's state through Store.append_audit_event. Every dict
+    payload also carries the run's strategy `profile` (strict | demo), so each audit row says which
+    profile produced it."""
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, profile: str = "strict") -> None:
         self.store = store
+        self.profile = profile
 
     def _append(self, kind: str, payload: Any, now: float) -> None:
-        self.store.append_audit_event(ACTOR, kind, _plain(payload), ts=now)
+        p = _plain(payload)
+        if isinstance(p, dict):
+            p = {**p, "profile": self.profile}
+        self.store.append_audit_event(ACTOR, kind, p, ts=now)
 
     # ---- writers
     def save_position(self, tp: TrackedPosition, now: float) -> None:
@@ -210,7 +216,7 @@ class BotState:
             elif kind == K_PLAN_DONE:
                 plans.pop(p["signal_id"], None)
             elif kind == K_COOLDOWN:
-                cooldown = p
+                cooldown = {k: v for k, v in p.items() if k != "profile"}
             elif kind == K_BAR:
                 bars.update({s: int(t) for s, t in p["bars"].items()})
         return LoadedState(positions, plans, planned, cooldown, bars)

@@ -18,15 +18,19 @@ Invariants:
 - Entries only on a NEW closed 15m bar, and only with fresh data (quote age <= max_data_age_s,
   bars lagging the clock by <= max_bar_lag_bars). Exits: strategy decisions on new bars, software
   stop / take-profit checks on every poll, stale data or not.
+- Backward clock step / future-dated data fails closed: a quote dated after the clock is not
+  fresh, a bar not yet closed by the clock is skipped (`bars_future`), and timers on stored
+  timestamps (LIMIT exit timeout, OMS stale-entry cancel, feed retries) re-anchor to the new clock
+  instead of stalling until it catches up (wallexbot/clockstep.py).
 
 Per tick: heartbeat -> (startup) -> feed refresh -> reconcile, cancel stale entry orders (emulated
 IOC, 20 s) and stale LIMIT exits (10 s) -> sync positions with the ledger -> new-bar work (exit
 policy per position, entry evaluation / ranking / sizing / advisor / submit) -> software stops and
 targets on live quotes -> place pending exits -> sync again.
 
-Run the guardian as a SEPARATE process on the same database:
-    python -m wallexbot.guardian.main --db PATH --mode mock|shadow
-It watches the "strategy" heartbeat written here every tick, loss limits and ledger-vs-exchange.
+The guardian runs in the same process (bot/main.py, guardian/main.py InProcessGuardian), ticked
+after every bot tick on its own Store connection and the same broker object. It watches the
+"strategy" heartbeat written here every tick, loss limits and ledger-vs-broker balances.
 """
 from __future__ import annotations
 
@@ -40,13 +44,15 @@ from wallexbot.bot.advice import AdvisorGate
 from wallexbot.bot.feed import BAR_S, notional_within
 from wallexbot.bot.state import (ACTOR, EXIT_PREFIX, BotState, EntryPlan, ExitRequest, TrackedPosition,
                                  exit_prefix, exit_signal_id)
+from wallexbot.clockstep import StepAnchors
 from wallexbot.config import Config
 from wallexbot.data.candles import Candle
+from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.pipeline import cancel_open_intent, route_to_oms, snapshot_account
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.strategy.config import MomentumParams
 from wallexbot.strategy.cooldown import CooldownTracker
-from wallexbot.strategy.sizing import min_notional_for
+from wallexbot.strategy.profiles import assert_profile_allowed
 from wallexbot.types import TERMINAL_STATES, IntentState, OrderIntent, OrderType, Position, Quote, Side, round_down
 
 S = IntentState
@@ -115,11 +121,16 @@ def simple_atr(bars: Sequence[Candle], period: int) -> Decimal | None:
 class Bot:
     def __init__(self, feed, signal_engine, exit_policy, sizing: Callable[..., Any], oms, risk, store, killswitch,
                  config: Config, clock: Callable[[], float] = time.time, advisor: Any = None, *,
-                 params: BotParams | None = None) -> None:
+                 params: BotParams | None = None, profile: str = "strict",
+                 run_info: Mapping[str, Any] | None = None) -> None:
+        self.run_info = {**dict(run_info or {}), "profile": profile}
+        if profile != "strict":   # the exercise profile needs an explicit mock/shadow run, never live
+            assert_profile_allowed(profile, str(self.run_info.get("mode")), config.mode)
+        self.profile = profile
         self.feed, self.engine, self.exit_policy, self.sizing = feed, signal_engine, exit_policy, sizing
         self.oms, self.risk, self.store, self.ks, self.cfg, self.clock = oms, risk, store, killswitch, config, clock
         self.p = params or BotParams()
-        self.state = BotState(store)
+        self.state = BotState(store, profile=profile)
         self.advisor = AdvisorGate(advisor, self.p.advisor_timeout_s) if advisor is not None else None
         self.cooldown = CooldownTracker(self.p.bar_s, self.p.cooldown_bars, self.p.cooldown_bars_profitable)
         self.positions: dict[str, TrackedPosition] = {}
@@ -131,6 +142,7 @@ class Bot:
         self.ticks = 0
         self._stale_noted: dict[str, int] = {}
         self._retry_noted: set[tuple[str, int, str]] = set()
+        self._exit_age = StepAnchors()      # resting LIMIT exit age (backward-clock-step safe)
 
     # ================================================================== tick
     def tick(self) -> TickReport:
@@ -193,7 +205,8 @@ class Bot:
         self.started = True
         self._decision("startup", {"positions": {s: {"key": t.key, "current_stop": t.current_stop}
                                                  for s, t in sorted(self.positions.items())},
-                                   "open_plans": sorted(self.plans), "recovered": recovered}, now)
+                                   "open_plans": sorted(self.plans), "recovered": recovered,
+                                   "run": self.run_info}, now)
         rep.actions.append("startup")
 
     def _recover_own_intents(self, now: float) -> list[str]:
@@ -222,10 +235,12 @@ class Bot:
         for cid in self.oms.cancel_stale(self.p.entry_ioc_s, now):
             self._decision("entry_ioc_canceled", {"client_id": cid}, now)
             rep.actions.append("entry_ioc_canceled")
-        for rec in self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED}):
+        resting = self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED})
+        self._exit_age.keep_only(r.intent.client_id for r in resting)
+        for rec in resting:
             i = rec.intent
             if (i.reduce_only and i.type is OrderType.LIMIT and i.signal_id.startswith(EXIT_PREFIX + ":")
-                    and now - rec.created_at > self.p.exit_limit_timeout_s):
+                    and self._exit_age.elapsed(i.client_id, rec.created_at, now) > self.p.exit_limit_timeout_s):
                 st = cancel_open_intent(self.oms, i.client_id, now)
                 self._decision("exit_limit_timeout", {"client_id": i.client_id, "symbol": i.symbol,
                                                       "state": st.value if st else None}, now)
@@ -263,6 +278,11 @@ class Bot:
         for sym in sorted(universe | set(self.positions)):
             bars = self.feed.closed_bars(sym, self.p.history_bars)
             if not bars or bars[-1].ts <= self.bars_done.get(sym, -1):
+                continue
+            if not bars[-1].ts <= boundary:   # not closed by our clock (clock stepped back / bad data)
+                if self._stale_noted.get(sym) != boundary:
+                    self._stale_noted[sym] = boundary
+                    self._decision("abstain", {"symbol": sym, "bar_ts": bars[-1].ts, "reason": "bars_future"}, now)
                 continue
             if (boundary - bars[-1].ts) // B > self.p.max_bar_lag_bars:
                 if self._stale_noted.get(sym) != boundary:
@@ -676,12 +696,12 @@ class Bot:
         return qty * self._mark(sym, fallback) < min_notional_for(rules, self.cfg.risk)
 
     def _is_dust(self, sym: str, pos: Position) -> bool:
-        """Nothing sellable: below one amount step, or worth less than the minimum notional."""
+        """Nothing sellable (the shared rule, wallexbot/dust.py): below one amount step, or worth
+        less than the minimum notional at the mark (bid, else the average entry price)."""
         rules = self.risk.rules.get(sym)
         if rules is None:
             return pos.quantity <= 0
-        q = round_down(pos.quantity, rules.amount_precision)
-        return q <= 0 or self._below_min(sym, q, pos.avg_price)
+        return is_dust(pos.quantity, rules, self._mark(sym, pos.avg_price), min_notional_for(rules, self.cfg.risk))
 
     def _sells_in_flight(self, sym: str) -> bool:
         return any(r.intent.symbol == sym and r.intent.side is Side.SELL
@@ -697,6 +717,7 @@ class Bot:
         return pos is not None and not self._is_dust(sym, pos)
 
     def _fresh(self, q: Quote | None, now: float) -> bool:
+        """Age in [0, max_data_age_s]: a quote dated after the clock is invalid, never fresh."""
         return q is not None and 0 <= now - q.ts <= self.cfg.max_data_age_s and q.bid > 0 and q.ask >= q.bid
 
     def _account(self, now: float, extra: Mapping[str, Quote]) -> AccountState:

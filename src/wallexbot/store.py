@@ -131,6 +131,7 @@ class IntentRecord:
     state: IntentState
     created_at: float
     updated_at: float
+    seq: int = 0          # insertion order (rowid): a total order across every connection to the DB
 
 
 @dataclass(frozen=True)
@@ -414,17 +415,17 @@ class Store:
             reduce_only=bool(r["reduce_only"]), stop_price=_undec(r["stop_price"]))
         if intent.client_id != r["client_id"]:
             raise StoreError(f"intent row {r['client_id']} does not reproduce its client_id")
-        return IntentRecord(intent, IntentState(r["state"]), r["created_at"], r["updated_at"])
+        return IntentRecord(intent, IntentState(r["state"]), r["created_at"], r["updated_at"], int(r["seq"]))
 
     def get_intent(self, client_id: str) -> IntentRecord | None:
-        r = self._conn.execute("SELECT * FROM order_intents WHERE client_id=?", (client_id,)).fetchone()
+        r = self._conn.execute("SELECT rowid AS seq, * FROM order_intents WHERE client_id=?", (client_id,)).fetchone()
         return None if r is None else self._record(r)
 
     def intents_in_states(self, states: Iterable[IntentState]) -> list[IntentRecord]:
         vals = [s.value for s in states]
         if not vals:
             return []
-        q = f"SELECT * FROM order_intents WHERE state IN ({','.join('?' for _ in vals)}) ORDER BY created_at, rowid"
+        q = f"SELECT rowid AS seq, * FROM order_intents WHERE state IN ({','.join('?' for _ in vals)}) ORDER BY created_at, rowid"
         return [self._record(r) for r in self._conn.execute(q, vals)]
 
     def set_intent_state(self, client_id: str, new: IntentState, *, expected: IntentState | None = None,

@@ -1,7 +1,9 @@
 """Guardian: the independent emergency layer (docs/RISK.md).
 
-It runs in its own process with its own Store connection and reads the EXCHANGE as the source of
-truth (balances, open orders, quotes). It imports nothing from wallexbot.strategy,
+It runs with its own Store connection and reads the BROKER as the source of truth (balances, open
+orders, quotes). In this build (mock/shadow) it runs inside the bot process against the bot's own
+broker object (guardian/main.py InProcessGuardian); a separate guardian process is only meaningful
+against a real exchange (live), which this build does not have. It imports nothing from wallexbot.strategy,
 wallexbot.backtest or wallexbot.ai (enforced by tests/test_guardian_isolation.py), and it never
 touches the broker's order entry: exits go through OMS.submit inside flatten.py.
 
@@ -13,6 +15,7 @@ One tick:
    wins), the high-water mark is appended when exceeded. Both are written only from fresh,
    fully marked data, so a stale feed cannot set them.
 4. Conditions:
+   Exposure (what is "held") ignores dust under the shared rule (wallexbot/dust.py).
    - soft breach (RiskEngine.breaches)                       -> kill switch (entries off)
    - hard breach                                             -> flatten_all(hard=True)
    - exchange base balance != OMS ledger beyond tolerance,
@@ -35,8 +38,9 @@ import logging
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
+from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.guardian.flatten import ACTOR, FlattenConfig, FlattenResult, flatten_all
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.types import IntentState, Side
@@ -86,8 +90,13 @@ class TickReport:
 class Guardian:
     def __init__(self, store, broker, risk, killswitch, oms, config: GuardianConfig | None = None,
                  clock: Callable[[], float] = time.time, *, sleep: Callable[[float], Any] = time.sleep,
-                 depth_fn: Callable[[str], Sequence] | None = None) -> None:
+                 depth_fn: Callable[[str], Sequence] | None = None,
+                 universe: Callable[[], Iterable[str]] | None = None) -> None:
+        """`universe`: symbols to quote and watch besides every symbol held (ledger or exchange
+        balance). None = every symbol in the risk rules. The in-process guardian passes the bot's
+        trading universe, so it does not quote hundreds of markets the bot never trades."""
         self.store, self.broker, self.risk, self.ks, self.oms = store, broker, risk, killswitch, oms
+        self.universe = universe
         self.cfg = config or GuardianConfig()
         self.clock, self.sleep, self.depth_fn = clock, sleep, depth_fn
         self.quote_ccy = self.cfg.quote_currency or risk.config.quote_currency
@@ -96,6 +105,7 @@ class Guardian:
         self.started_at = float(clock())
         self._last_fresh: dict[str, float] = {}
         self._future_logged: set[str] = set()
+        self._quote_err_logged: set[str] = set()
         self._mismatch_streak: dict[str, int] = {}
         self._reviewed: frozenset[str] = frozenset()
         self._last_logged: tuple | None = None
@@ -113,14 +123,14 @@ class Guardian:
             rep.conditions.append("open_orders_unavailable")
             open_orders = []
         positions = self.oms.positions()
-        quotes, future_dated = self._quotes(now)
+        rules = self.risk.rules
+        syms = self._watch_symbols(balances, positions, now)
+        quotes, future_dated = self._quotes(now, syms, quiet=self._universe_only(syms, balances, positions))
         if future_dated:
             rep.conditions.append("future_quote_ts:" + ",".join(future_dated))
-        rules = self.risk.rules
 
-        held = sorted(s for s, r in rules.items()
-                      if self._total(balances, r.base) > 0 or self._qty(positions, s) > 0)
-        watch = held or sorted(rules)
+        held = sorted(s for s in syms if not self._dust(s, rules[s], balances, positions, quotes))
+        watch = held or syms
         feed_age = max((now - self._last_fresh.get(s, self.started_at) for s in watch), default=0.0)
         if feed_age > self.max_age:
             rep.conditions.append("stale_feed")
@@ -199,7 +209,28 @@ class Guardian:
                            config=self.cfg.flatten, clock=self.clock, sleep=self.sleep, account=account,
                            reason=reason, depth_fn=self.depth_fn)
 
-    def _quotes(self, now: float) -> tuple[dict[str, Any], list[str]]:
+    def _watch_symbols(self, balances, positions, now: float) -> list[str]:
+        rules = self.risk.rules
+        if self.universe is None:
+            return sorted(rules)
+        out = {s for s, r in rules.items() if self._total(balances, r.base) > 0 or self._qty(positions, s) > 0}
+        try:
+            out |= {s for s in self.universe() if s in rules}
+        except Exception as e:   # held symbols are still watched
+            self._error("guardian.monitor", f"universe failed: {e!r}", now)
+        return sorted(out)
+
+    def _universe_only(self, syms, balances, positions) -> frozenset[str]:
+        """Watched only because the bot may trade them (nothing held): a missing quote there is
+        not an error row (it still counts toward stale_feed when nothing is held)."""
+        if self.universe is None:
+            return frozenset()
+        rules = self.risk.rules
+        return frozenset(s for s in syms
+                         if self._total(balances, rules[s].base) <= 0 and self._qty(positions, s) <= 0)
+
+    def _quotes(self, now: float, symbols: Iterable[str] | None = None,
+                quiet: frozenset[str] = frozenset()) -> tuple[dict[str, Any], list[str]]:
         """Quotes usable for marking, and the symbols whose quote was dated in the future.
 
         Freshness is clamped to `now`: a quote up to `max_quote_future_skew_s` ahead counts as
@@ -209,12 +240,15 @@ class Guardian:
         out, future = {}, []
         for sym in list(self._last_fresh):
             self._last_fresh[sym] = min(self._last_fresh[sym], now)
-        for sym in self.risk.rules:
+        for sym in (self.risk.rules if symbols is None else symbols):
             try:
                 q = self.broker.quote(sym)
-            except Exception as e:
-                self._error("guardian.monitor", f"quote {sym} failed: {e!r}", now)
+            except Exception as e:   # logged once per symbol until a quote succeeds again
+                if sym not in self._quote_err_logged and sym not in quiet:
+                    self._quote_err_logged.add(sym)
+                    self._error("guardian.monitor", f"quote {sym} failed: {e!r}", now)
                 continue
+            self._quote_err_logged.discard(sym)
             ts = float(q.ts)
             if not ts <= now + self.cfg.max_quote_future_skew_s:   # also rejects NaN
                 future.append(sym)
@@ -289,6 +323,16 @@ class Guardian:
             self.oms.reconcile(now=now)
         except Exception as e:
             self._error("guardian.monitor", f"reconcile failed: {e!r}", now)
+
+    def _dust(self, sym: str, rules, balances, positions, quotes) -> bool:
+        """Flat for exposure purposes: exchange total AND ledger quantity are dust under the shared
+        rule (wallexbot/dust.py), marked at the bid (else the ledger's average price)."""
+        pos = positions.get(sym)
+        q = quotes.get(sym)
+        mark = q.bid if q is not None else (pos.avg_price if pos is not None else None)
+        floor = min_notional_for(rules, self.risk.config.risk)
+        return all(is_dust(qty, rules, mark, floor)
+                   for qty in (self._total(balances, rules.base), self._qty(positions, sym)))
 
     @staticmethod
     def _total(balances, asset: str) -> Decimal:

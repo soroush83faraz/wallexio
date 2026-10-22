@@ -102,7 +102,7 @@ def test_cli_refuses_modes_other_than_mock_and_shadow(tmp_path, mode, capsys):
 @pytest.mark.parametrize("mode", ["mock", "shadow"])
 def test_cli_mock_and_shadow_run(tmp_path, mode, capsys):
     db = tmp_path / "g.db"
-    assert main(["--db", str(db), "--mode", mode, "--ticks", "2", "--interval", "0"]) == 0
+    assert main(["--db", str(db), "--mode", mode, "--demo-db", "--ticks", "2", "--interval", "0"]) == 0
     assert "guardian stopped: ticks=2 failed=0" in capsys.readouterr().out
     s = Store(db)
     try:

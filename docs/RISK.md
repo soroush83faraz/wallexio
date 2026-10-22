@@ -1,6 +1,6 @@
 # Risk
 
-Status: limits are defined in `config/default.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian (`guardian/monitor.py`, `flatten.py`, `main.py`) and the hard-breach flatten procedure are implemented and tested against `MockWallex` only (`tests/test_guardian_*.py`). They have never run against the real exchange. The bot loop (`bot/`, mock and shadow only) writes the strategy heartbeat each tick; a separately started guardian on the same database watches it. In mock/replay runs the paper broker lives inside the bot process, so that guardian sees its own demo broker, not the bot's; the ledger, heartbeat and kill switch are shared through the DB.
+Status: limits are defined in `config/default.yaml` and loaded by `config.py`. The risk engine (`risk/engine.py`) and kill switch (`risk/killswitch.py`) exist and are tested (`tests/test_risk.py`, `tests/test_killswitch.py`). The guardian (`guardian/monitor.py`, `flatten.py`, `main.py`) and the hard-breach flatten procedure are implemented and tested against `MockWallex` only (`tests/test_guardian_*.py`). They have never run against the real exchange. The bot loop (`bot/`, mock and shadow only) writes the strategy heartbeat each tick and runs the guardian in-process, on its own DB connection and the bot's own broker object (`--no-guardian` disables it).
 
 ## Limits
 
@@ -11,7 +11,7 @@ Values from `config/default.yaml`. Percentages are of equity; order value is in 
 | Risk per trade | `risk.risk_per_trade_pct` | 1.0% | Basis for position sizing (STRATEGY.md) |
 | Max position | `risk.max_position_pct` | 25% | Checked per symbol in `risk/engine.py`; sizing basis in STRATEGY.md not yet fixed |
 | Max exposure | `risk.max_exposure_pct` | 60% | Checked against held plus pending value in `risk/engine.py` |
-| Max open positions | `risk.max_open_positions` | 3 | |
+| Max open positions | `risk.max_open_positions` | 3 | Dust is flat (see Dust) |
 | Max order value | `risk.max_order_value` | 1000 USDT | |
 | Daily loss, soft | `risk.daily_loss_soft_pct` | 4% | |
 | Daily loss, hard | `risk.daily_loss_hard_pct` | 6% | |
@@ -50,7 +50,13 @@ The risk engine runs ordered, fail-closed checks on entries (BUY, not reduce-onl
 
 There is no depth check in the engine yet, so the "min depth multiple" limit is not enforced.
 
-Exit orders are reduce-only. They skip entry limits, the kill switch and loss breaches. They still need known symbol rules and exact precision, and they cannot sell more than is held and uncommitted (see `tests/test_risk.py`).
+Exit orders are reduce-only. They skip entry limits, the kill switch and loss breaches. They still need known symbol rules and exact precision, and they cannot sell more than is held and uncommitted (see `tests/test_risk.py`). Committed = SELLs in `risk_approved`, `submitted`, `partially_filled`, `unknown_pending`, plus SELLs still `proposed` and younger than 30 s that were inserted before the checked one; an older `proposed` is a crash leftover (`recover()` settles it).
+
+**Exit race (bot exit vs guardian flatten).** The risk check, its `risk_decisions` row and the `proposed -> risk_approved | rejected` change are one store transaction, so no other connection sees a decided-but-proposed exit. Flatten treats a young `proposed` SELL as ambiguous and waits for it. With both layers exactly one SELL reaches the broker in every interleaving tested (`tests/test_exit_race.py`).
+
+**Dust** (`dust.py`, used by the risk engine, the bot and the guardian): quantity below one amount step, or notional at the mark below `max(exchange min, risk.min_notional)`. Fee dust left after an exit is flat everywhere, so it neither blocks new symbols (max open positions) nor triggers a flatten.
+
+**Clock steps.** Data dated after the clock is invalid, not fresh: quotes, bars not yet closed by the clock (`bars_future`), cached shadow depth. Timers on stored timestamps (OMS not-found grace and stale-entry cancel, LIMIT exit timeout, feed retries) re-anchor to the new clock after a backward step instead of stalling (`clockstep.py`, `tests/test_clock_step.py`).
 
 ## Soft breach
 
@@ -60,7 +66,7 @@ Exit orders are reduce-only. They skip entry limits, the kill switch and loss br
 
 ## Guardian (`guardian/`)
 
-A separate process with its own `Store` connection, its own `KillSwitch`/`RiskEngine`/`OMS` around the injected broker. It imports nothing from `strategy`, `backtest` or `ai` (`tests/test_guardian_isolation.py`). The exchange is the source of truth: equity is quote balance plus base holdings marked at the bid. Run exactly one guardian per database. Demo entry point (mock/shadow only, no network): `python -m wallexbot.guardian.main --db PATH --mode mock|shadow [--ticks N] [--interval S]`.
+Runs inside the bot process (`InProcessGuardian`), with its own `Store` connection and its own `KillSwitch`/`RiskEngine`/`OMS` around the bot's broker object; ticked after every bot tick and at least every 15 s. It imports nothing from `strategy`, `backtest` or `ai` (`tests/test_guardian_isolation.py`). The broker is the source of truth: equity is quote balance plus base holdings marked at the bid. The standalone `python -m wallexbot.guardian.main --db NEW.db --mode mock --demo-db` is a demo on its own mock broker and refuses a bot's database.
 
 Each tick (`GuardianConfig` defaults) the guardian reconciles the OMS, reads balances, open orders and quotes, then checks:
 
@@ -83,7 +89,7 @@ A failed tick is logged and the loop continues; 3 consecutive failed ticks engag
 3. Per position, place reduce-only SELL exits **through `OMS.submit`** (the reviewed entry in the AST allow-list is `_Flattener._place_exit`). Hard breach goes straight to MARKET; otherwise LIMIT at bid minus 20 bps, escalating to MARKET after a LIMIT timeout (10 s) or failure; a MARKET still open after 5 s is cancelled. Each child order is at most 50% of the reachable visible bid depth (MARKET: within 2% of the best bid, matching Wallex's auto-cancel). Sizes come from confirmed exchange balances, capped by the ledger.
 4. Poll until flat, or give up after 3 failed exits per symbol and record `needs_review` plus an alert row in `errors` (source `guardian.alert`).
 
-Safeguards: no resubmission (a new exit is placed only when every earlier SELL intent for the symbol is terminal; `unknown_pending` is waited out via reconcile); deterministic ids (`gflat:<UTC day>-<cause>:<symbol>:<n>`), so a re-run cannot send the same client id twice; bounded orders (20 per symbol), waits and loop iterations. `dry_run` (shadow mode) plans and audits without broker writes.
+Safeguards: no resubmission (a new exit is placed only when every earlier SELL intent for the symbol is terminal; `unknown_pending` and a young `proposed` SELL are waited out); deterministic ids (`gflat:<UTC day>-<cause>:<symbol>:<n>`), so a re-run cannot send the same client id twice; bounded orders (20 per symbol), waits and loop iterations. `dry_run` plans and audits without broker writes (the standalone demo's `--mode shadow`; the in-process guardian of a shadow bot sells on the simulated ShadowBroker).
 
 Unverified: Wallex cancellation behaviour, market-order behaviour in thin books, and stop-order balance locking. All are exercised only against the mock.
 

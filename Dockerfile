@@ -28,7 +28,7 @@ RUN groupadd --system --gid 10001 wallex \
 VOLUME ["/data"]
 USER 10001:10001
 
-# Healthy = fresh strategy heartbeat, no recent guardian alerts (read-only look at the DB).
+# Healthy = fresh strategy heartbeat (and in-process guardian heartbeat when enabled), no recent guardian alerts (read-only look at the DB).
 # The first heartbeat appears after the bot's first tick, hence the start period.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
     CMD ["python", "/app/deploy/healthcheck.py", "--db", "/data/bot.db"]

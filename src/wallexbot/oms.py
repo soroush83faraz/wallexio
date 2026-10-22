@@ -10,6 +10,18 @@ Invariants:
   order never double-counts. Fill rows, position snapshot and state change commit atomically.
 - Positions are long-only; fees in the base asset reduce quantity, any fee is valued in the quote
   currency; the exact cost basis (fees included) drives realized P&L, which is net of fees.
+- Risk decision and state change are ONE store transaction (BEGIN IMMEDIATE): the open-order view
+  the risk engine sees, the risk_decisions row and PROPOSED -> RISK_APPROVED | REJECTED commit
+  together, so no other connection (the guardian) can observe a decided-but-PROPOSED intent, and
+  two actors' checks are serialised by SQLite's write lock.
+- Committed SELLs (what an exit may not oversell) = open intents (OPEN_INTENT_STATES) plus every
+  SELL intent still PROPOSED and younger than PROPOSED_COMMIT_WINDOW_S (an actor is between
+  append_intent and its risk transaction). A PROPOSED older than that is a crash leftover: it is
+  ignored here and recover() settles it. A PROPOSED dated in the future (clock stepped back) counts
+  as young: fail closed. For a given intent only PROPOSED SELLs inserted BEFORE it count (store
+  insertion order), so of two racing exits the earlier one wins and they never block each other.
+- Timers on stored timestamps (not-found grace, stale-entry cancel) use clockstep.StepAnchors: a
+  timestamp after `now` (backward clock step) re-anchors the timer at `now` instead of stalling it.
 """
 from __future__ import annotations
 
@@ -19,15 +31,22 @@ from decimal import (ROUND_HALF_EVEN, Context, Decimal, DecimalException, Divisi
                      InvalidOperation, Overflow, localcontext)
 from typing import Callable
 
+from wallexbot.clockstep import StepAnchors
 from wallexbot.exchange.base import BrokerOrder, OrderRejected, OrderStatus, RateLimited
 from wallexbot.risk.engine import AccountState, RiskDecision
-from wallexbot.store import Store
+from wallexbot.store import IntentRecord, Store
 from wallexbot.types import TERMINAL_STATES, Fill, IntentState, OrderIntent, Position, Quote, Side
 
 S = IntentState
 OPEN_INTENT_STATES = frozenset({S.RISK_APPROVED, S.SUBMITTED, S.PARTIALLY_FILLED, S.UNKNOWN_PENDING})
 _RECONCILE_STATES = frozenset({S.SUBMITTED, S.PARTIALLY_FILLED, S.UNKNOWN_PENDING})
+PROPOSED_COMMIT_WINDOW_S = 30.0
 _ZERO = Decimal(0)
+
+
+def is_young_proposed(rec: IntentRecord, now: float, window_s: float = PROPOSED_COMMIT_WINDOW_S) -> bool:
+    """PROPOSED and created less than `window_s` before `now` (or after it: clock stepped back)."""
+    return rec.state is S.PROPOSED and not now - rec.created_at >= window_s
 
 
 class LedgerError(Exception):
@@ -133,6 +152,8 @@ class OMS:
         self.approve = approve
         self.clock = clock
         self.not_found_grace_s = not_found_grace_s
+        self._grace = StepAnchors()     # not-found grace per client_id (updated_at)
+        self._age = StepAnchors()       # resting-entry age per client_id (created_at)
 
     # ------------------------------------------------------------------ views
     def positions(self) -> dict[str, Position]:
@@ -141,6 +162,16 @@ class OMS:
     def open_intents(self) -> list[OrderIntent]:
         """Intents that may hold a live exchange order (ambiguous ones included)."""
         return [r.intent for r in self.store.intents_in_states(OPEN_INTENT_STATES)]
+
+    def committed_intents(self, now: float, before_seq: int | None = None) -> list[OrderIntent]:
+        """open_intents() plus SELLs still PROPOSED and younger than PROPOSED_COMMIT_WINDOW_S
+        (inserted before `before_seq` when given): every order that may still reach the exchange."""
+        out = self.open_intents()
+        for r in self.store.intents_in_states({S.PROPOSED}):
+            if r.intent.side is Side.SELL and is_young_proposed(r, now) and \
+                    (before_seq is None or r.seq < before_seq):
+                out.append(r.intent)
+        return out
 
     # ------------------------------------------------------------------ submit
     def submit(self, intent: OrderIntent, quote: Quote | None, account: AccountState,
@@ -154,20 +185,25 @@ class OMS:
                 self._cas(cid, S.RISK_APPROVED, S.UNKNOWN_PENDING, "resubmit_seen_risk_approved", now)
             return SubmitResult(cid, self._state(cid), sent=False)
 
-        try:
-            decision = self.risk.check(intent, quote, account, self.positions(), self.open_intents(), now)
-        except Exception as e:
-            decision = RiskDecision(False, (f"risk_error:{type(e).__name__}",))
-        self.store.append_risk_decision(cid, decision, ts=now)
-        try:
-            approved = self.approve(decision) is True
-        except Exception:
-            approved = False
-        if not approved:
-            self._cas(cid, S.PROPOSED, S.REJECTED, "risk:" + ",".join(decision.reasons), now)
-            return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
-        if not self._cas(cid, S.PROPOSED, S.RISK_APPROVED, "risk_approved", now):
-            return SubmitResult(cid, self._state(cid), sent=False, decision=decision)  # lost a race
+        with self.store.tx():   # risk view + decision + transition: one atomic step (see module doc)
+            rec = self.store.get_intent(cid)
+            if rec.state is not S.PROPOSED:   # settled by someone else (recover) meanwhile
+                return SubmitResult(cid, rec.state, sent=False)
+            try:
+                decision = self.risk.check(intent, quote, account, self.positions(),
+                                           self.committed_intents(now, before_seq=rec.seq), now)
+            except Exception as e:
+                decision = RiskDecision(False, (f"risk_error:{type(e).__name__}",))
+            self.store.append_risk_decision(cid, decision, ts=now)
+            try:
+                approved = self.approve(decision) is True
+            except Exception:
+                approved = False
+            if not approved:
+                self._cas(cid, S.PROPOSED, S.REJECTED, "risk:" + ",".join(decision.reasons), now)
+                return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
+            if not self._cas(cid, S.PROPOSED, S.RISK_APPROVED, "risk_approved", now):
+                return SubmitResult(cid, self._state(cid), sent=False, decision=decision)  # lost a race
         if not self._ks_allows(intent):  # last-moment gate
             self._cas(cid, S.RISK_APPROVED, S.REJECTED, "kill_switch", now)
             return SubmitResult(cid, self._state(cid), sent=False, decision=decision)
@@ -203,6 +239,7 @@ class OMS:
             self.store.append_error("oms.reconcile", f"open_orders failed: {e!r}", ts=now)
             open_by_id = None
         out: dict[str, IntentState] = {}
+        self._grace.keep_only(r.intent.client_id for r in pending)
         for rec in pending:
             cid = rec.intent.client_id
             try:
@@ -219,7 +256,7 @@ class OMS:
             elif open_by_id is None:
                 pass  # absence not confirmed by both lookups: stay as is
             elif rec.state is S.UNKNOWN_PENDING:
-                if now - rec.updated_at >= self.not_found_grace_s:
+                if self._grace.elapsed(cid, rec.updated_at, now) >= self.not_found_grace_s:
                     self.store.append_broker_event(cid, "reconcile_not_found", None, ts=now)
                     self._cas(cid, S.UNKNOWN_PENDING, S.REJECTED, "not_found_at_exchange", now)
             else:  # the exchange acknowledged this order earlier and now has no record of it
@@ -241,8 +278,10 @@ class OMS:
         """Cancel resting ENTRY orders older than max_age_s. Returns client_ids canceled."""
         now = self._now(now)
         done = []
-        for rec in self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED}):
-            if rec.intent.reduce_only or now - rec.created_at <= max_age_s:
+        resting = self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED})
+        self._age.keep_only(r.intent.client_id for r in resting)
+        for rec in resting:
+            if rec.intent.reduce_only or self._age.elapsed(rec.intent.client_id, rec.created_at, now) <= max_age_s:
                 continue
             cid = rec.intent.client_id
             try:
