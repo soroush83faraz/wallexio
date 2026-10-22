@@ -50,7 +50,7 @@ services:
     <<: *common
     container_name: wallexbot-recorder
     profiles: ["recorder"]
-    command: ["python", "/app/deploy/run_recorder.py", "--out-dir", "/data/recorder", "--interval-s", "15"]
+    command: ["python", "-m", "wallexbot", "record", "--out", "/data/recorder", "--interval-s", "15"]
     healthcheck:
       test: ["CMD", "python", "/app/deploy/healthcheck.py", "--recorder-dir", "/data/recorder"]
       interval: 60s

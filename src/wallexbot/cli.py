@@ -1,9 +1,13 @@
-"""Command line entry: `python -m wallexbot <demo|backtest|doctor|guardian|bot>`.
+"""Command line entry: `python -m wallexbot <demo|backtest|doctor|guardian|bot|record|history>`.
 
     demo       scripted mock round trip (signal -> risk -> OMS -> MockWallex), pretty-printed
     backtest   exploratory grid on train+validation of local 1m history (see backtest/runner.py);
                `--cost-source recorded|proxy`, `--bar-minutes 15 60`, `--report-prefix v2_`;
                `--final-test --params-file frozen.json` is the single-use test-set evaluation
+    record     market-data recorder (public GETs only): depth + trades -> <out>/depth_YYYYMMDD.jsonl, trades_*.jsonl;
+               `--out DIR --symbols A,B | --top-n 12 --interval-s 15 --max-cycles N`; SIGTERM stops after the cycle
+    history    resumable 1m candle downloader (public GETs only): `--out DIR --symbols A,B | --top-n 12
+               --days 45 --max-requests 1500`; re-run the same command to resume
     calibrate-costs  spread/slippage calibration from recorded order books -> reports/cost_calibration.json
     doctor     read-only account preflight; needs WALLEX_API_KEY_READ in the environment (exit 2 without it)
     guardian   standalone guardian DEMO on its own mock broker and a NEW database (--demo-db); it refuses a
@@ -128,6 +132,16 @@ def _doctor(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _record(args: argparse.Namespace) -> int:
+    from wallexbot.data.collect import run_record
+    return run_record(args)
+
+
+def _history(args: argparse.Namespace) -> int:
+    from wallexbot.data.collect import run_history
+    return run_history(args)
+
+
 def _bot(argv: list[str]) -> int:
     """`bot` passes everything to wallexbot.bot.main except --advisor, which is wired here (bot/ never imports ai/)."""
     pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
@@ -189,6 +203,26 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR / "cost_calibration.json",
                    help="output JSON (default reports/cost_calibration.json; a .md rendering is written next to it)")
     c.set_defaults(func=_calibrate)
+
+    def _universe(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument("--symbols", nargs="+", metavar="SYM",
+                        help="markets, comma and/or space separated (default: the 7-symbol backtest universe)")
+        sp.add_argument("--top-n", type=int, default=None,
+                        help="instead of --symbols: the N highest 24h-volume USDT markets (one public GET)")
+
+    rc = sub.add_parser("record", help="market-data recorder: depth + trades to JSONL (public GETs only)")
+    rc.add_argument("--out", type=Path, default=Path("data") / "recorder", help="output directory (default data/recorder)")
+    _universe(rc)
+    rc.add_argument("--interval-s", type=float, default=15.0, help="seconds between cycles (default 15, min 1)")
+    rc.add_argument("--max-cycles", type=int, default=None, help="stop after N cycles (default: until SIGTERM/SIGINT)")
+    rc.set_defaults(func=_record)
+
+    h = sub.add_parser("history", help="resumable 1m candle downloader (public GETs only)")
+    h.add_argument("--out", type=Path, default=DEFAULT_HISTORY_DIR, help="output directory (default data/history)")
+    _universe(h)
+    h.add_argument("--days", type=int, default=45, help="how many days back from now (default 45)")
+    h.add_argument("--max-requests", type=int, default=1500, help="hard request budget for the whole run (default 1500)")
+    h.set_defaults(func=_history)
 
     r = sub.add_parser("doctor", help=f"read-only preflight (needs {READ_KEY_ENV})")
     r.set_defaults(func=_doctor)

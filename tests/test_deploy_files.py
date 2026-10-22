@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy"
 UNITS = sorted((DEPLOY / "systemd").glob("wallexbot-*.service"))
 NEW_FILES = [ROOT / "Dockerfile", ROOT / ".dockerignore", ROOT / "docker-compose.yml", ROOT / "Makefile",
-             ROOT / "docs" / "DEPLOY.md", DEPLOY / "healthcheck.py", DEPLOY / "run_recorder.py",
+             ROOT / "docs" / "DEPLOY.md", DEPLOY / "healthcheck.py",
              DEPLOY / "env.example", *UNITS]
 KEYLIKE = re.compile(r"(?i)key|secret|token|passw|arm_live")
 
@@ -32,7 +32,6 @@ def _load(name: str):
 
 
 healthcheck = _load("healthcheck")
-run_recorder = _load("run_recorder")
 
 
 # ---------------------------------------------------------------- Dockerfile
@@ -41,10 +40,26 @@ def _docker_lines() -> list[str]:
     return [ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")]
 
 
+PINNED = r"python:3\.12\.\d+-slim[\w.-]*"
+
+
 def test_dockerfile_pins_base_image():
-    froms = [ln.split()[1] for ln in _docker_lines() if ln.upper().startswith("FROM ")]
-    assert froms and all(re.fullmatch(r"python:3\.12\.\d+-slim[\w.-]*", f) for f in froms), froms
+    """The default base is a pinned Docker Hub tag; BASE_IMAGE lets a registry mirror replace it at build time."""
+    lines = _docker_lines()
+    froms = [ln.split()[1] for ln in lines if ln.upper().startswith("FROM ")]
+    assert froms == ["${BASE_IMAGE}"]
+    args = [ln.split(None, 1)[1] for ln in lines if ln.upper().startswith("ARG BASE_IMAGE=")]
+    assert len(args) == 1 and re.fullmatch(PINNED, args[0].split("=", 1)[1]), args
+    assert lines.index(f"ARG {args[0]}") < lines.index("FROM ${BASE_IMAGE}")    # ARG before FROM
     assert ":latest" not in (ROOT / "Dockerfile").read_text()
+
+
+def test_dockerfile_installs_the_package_non_editable_and_ships_no_second_config():
+    lines = _docker_lines()
+    installs = [ln for ln in lines if "pip install" in ln]
+    assert installs and all(" -e " not in f" {ln} " and "--editable" not in ln for ln in installs), installs
+    assert not any(ln.startswith("COPY") and "config" in ln.split()[1:-1] for ln in lines)
+    assert "run_recorder" not in "\n".join(lines)
 
 
 def test_dockerfile_non_root_workdir_volume_healthcheck_cmd():
@@ -122,7 +137,7 @@ def test_systemd_units_are_hardened(unit):
     for name in ("TimeoutStopSec", "TimeoutStartSec", "CapabilityBoundingSet", "SystemCallFilter", "MemoryMax",
                  "RestrictAddressFamilies", "PrivateDevices", "StateDirectory"):
         assert name in directives, f"{unit.name}: missing {name}"
-    assert "--mode shadow" in text or "run_recorder.py" in text
+    assert "--mode shadow" in text or "-m wallexbot record" in text
     assert "ARM_LIVE" not in text and "API_KEY" not in text
 
 
@@ -390,28 +405,11 @@ def test_recorder_dir_check(tmp_path):
     assert code == 1
 
 
-# ---------------------------------------------------------------- recorder entry point
-def test_recorder_symbols_resolution():
-    assert run_recorder.resolve_symbols(None, None) == list(run_recorder.DEFAULT_SYMBOLS)
-    assert run_recorder.resolve_symbols(None, "BTCUSDT, ETHUSDT ETHUSDT") == ["BTCUSDT", "ETHUSDT"]
-    assert run_recorder.resolve_symbols(["SOLUSDT"], "BTCUSDT") == ["SOLUSDT"]
-    with pytest.raises(ValueError):
-        run_recorder.resolve_symbols(["btc/usdt; rm"], None)
+# ---------------------------------------------------------------- recorder entry point (now `wallexbot record`)
+def test_recorder_is_started_through_the_cli_everywhere():
+    assert not (DEPLOY / "run_recorder.py").exists()
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    assert compose["services"]["recorder"]["command"][:4] == ["python", "-m", "wallexbot", "record"]
+    unit = (DEPLOY / "systemd" / "wallexbot-recorder.service").read_text()
+    assert "-m wallexbot record --out /var/lib/wallexbot/recorder" in unit and "run_recorder" not in unit
 
-
-def test_recorder_runs_one_cycle_with_a_fake_public_client(tmp_path):
-    from decimal import Decimal
-    from types import SimpleNamespace
-
-    class FakeClient:
-        def depth(self, symbol):
-            return SimpleNamespace(ts=1_700_000_000.0, bids=[(Decimal("99"), Decimal("1"))], asks=[(Decimal("101"), Decimal("1"))])
-
-        def trades(self, symbol):
-            return [SimpleNamespace(ts=1_700_000_000.0, price=Decimal("100"), quantity=Decimal("1"), is_buy=True)]
-
-    out = tmp_path / "rec"
-    assert run_recorder.main(["--out-dir", str(out), "--symbols", "BTCUSDT", "--max-cycles", "1"], client=FakeClient()) == 0
-    files = sorted(p.name for p in out.glob("*.jsonl"))
-    assert len(files) == 2 and files[0].startswith("depth_") and files[1].startswith("trades_")
-    assert run_recorder.main(["--out-dir", str(out), "--symbols", "bad symbol"], client=FakeClient()) == 2

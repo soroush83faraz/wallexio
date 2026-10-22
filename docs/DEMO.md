@@ -63,15 +63,12 @@ What the two replays produced on the local `data/history` (8 symbols, 2026-09-06
 
 ## Works now: market-data download and recorder (public GETs, need network)
 
-`wallexbot.data.history.fetch_history` downloads 1m candles to `data/history/<SYMBOL>/` (resumable). `wallexbot.data.recorder.Recorder` appends depth and trades to `data/recorder/depth_<YYYYMMDD>.jsonl` and `trades_<YYYYMMDD>.jsonl`:
-
-```python
-from wallexbot.exchange.wallex_public import WallexPublicClient
-from wallexbot.data.recorder import Recorder
-Recorder(WallexPublicClient(), ["BTCUSDT", "ETHUSDT"], "data/recorder", interval_s=15).run_forever(handle_signals=True)
+```bash
+python -m wallexbot history --out data/history --top-n 12 --days 45 --max-requests 1500   # resumable: re-run to continue
+python -m wallexbot record  --out data/recorder --symbols BTCUSDT,ETHUSDT --interval-s 15 # until SIGTERM/Ctrl-C (or --max-cycles N)
 ```
 
-Neither has a CLI. Do not make network calls during a live demo unless intended.
+`history` downloads 1m candles to `data/history/<SYMBOL>/` (newest first; re-runs fetch only what is missing; exit 1 = stopped early, run it again). `record` appends depth and trades to `data/recorder/depth_<YYYYMMDD>.jsonl` and `trades_<YYYYMMDD>.jsonl` and, on SIGTERM, finishes the current cycle and exits 0. `--symbols` takes commas and/or spaces; `--top-n N` picks the N highest 24h-volume USDT markets (one public GET); with neither, the 7-symbol backtest universe is used. Both are public GETs to `api.wallex.ir` only and have no order path. Do not make network calls during a live demo unless intended.
 
 ## Lines to say
 
