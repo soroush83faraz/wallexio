@@ -277,7 +277,14 @@ class Store:
 
     @contextmanager
     def tx(self) -> Iterator[None]:
-        """Atomic block. Nested calls use savepoints."""
+        """Atomic block. Nested calls use savepoints.
+
+        A failing COMMIT (or RELEASE) is never left half-open: SQLite does not always roll back
+        by itself (e.g. an I/O error on COMMIT), and a connection stuck in a write transaction
+        would refuse every later BEGIN ('cannot start a transaction within a transaction') until
+        a restart. On any COMMIT exception the transaction is rolled back (secondary errors
+        ignored), the nesting depth is reset, and the original exception is re-raised, so a
+        retry of the same work starts clean."""
         if self._depth == 0:
             self._conn.execute("BEGIN IMMEDIATE")
             begin, commit, rollback = None, "COMMIT", "ROLLBACK"
@@ -296,7 +303,18 @@ class Store:
                     self._conn.execute(f"RELEASE {begin}")
             raise
         self._depth -= 1
-        self._conn.execute(commit)
+        try:
+            self._conn.execute(commit)
+        except BaseException:
+            undo = ("ROLLBACK",) if begin is None else (rollback, f"RELEASE {begin}")
+            for sql in undo:
+                try:
+                    self._conn.execute(sql)
+                except Exception:
+                    pass
+            if begin is None:
+                self._depth = 0
+            raise
 
     def _insert(self, table: str, row: dict[str, Any]) -> int:
         cols = ",".join(row)
