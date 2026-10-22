@@ -267,7 +267,27 @@ def test_get_order_is_a_get_with_the_read_key(armed):
     broker(t, armed).get_order(CID)
     c = t.calls[0]
     assert (c.method, c.url, c.body) == ("GET", f"{BASE}/v1/account/orders/{CID}", None)
-    assert c.headers["X-API-Key"] == FAKE_READ_KEY and "Content-Type" not in c.headers
+    assert c.headers["X-API-Key"] == FAKE_READ_KEY
+
+
+def test_every_private_request_sends_the_documented_json_content_type(armed):
+    """The docs ask for Content-Type: application/json on every request, bodiless ones too."""
+    t = Scripted(ok(order_json(), 201), ok(order_json()), ok({"orders": []}),
+                 ok({"balances": {}}), ok({SYM: {"makerFeeRate": "0.002", "takerFeeRate": "0.002"}}),
+                 ok({}), ok(order_json(status="CANCELED")))
+    b = broker(t, armed, sub_account=Secret(FAKE_SUB))
+    place(b)
+    b.get_order(CID)
+    b.open_orders()
+    b.balances()
+    b.fee_rates()
+    b.cancel_order(CID)
+    assert [c.method for c in t.calls] == ["POST"] + ["GET"] * 4 + ["DELETE", "GET"]
+    for c in t.calls:
+        assert c.headers["Content-Type"] == "application/json"
+        assert c.headers["Accept"] == "application/json"
+        assert c.headers["sub-account-client-id"] == FAKE_SUB
+        assert (c.body is None) is (c.method != "POST")
 
 
 def test_reads_fall_back_to_the_trade_key_only_without_a_read_key(armed):

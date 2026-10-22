@@ -197,12 +197,13 @@ def _url(path: str, params: Mapping[str, object] | None = None) -> str:
     return assert_host_allowed(BASE_URL + path + query)     # raises before any I/O
 
 
-def _headers(key: Secret, sub_account: str | Secret | None, *, json_body: bool = False) -> dict:
+def _headers(key: Secret, sub_account: str | Secret | None) -> dict:
+    """Auth headers plus the JSON headers. Wallex's docs ask for Content-Type: application/json
+    on EVERY request, so it is sent on GET and DELETE (which have no body) too."""
     headers = build_auth_headers(key, sub_account)          # AuthHeaders: its repr is redacted
     headers["Accept"] = "application/json"
+    headers["Content-Type"] = "application/json"
     headers["User-Agent"] = USER_AGENT
-    if json_body:
-        headers["Content-Type"] = "application/json"
     return headers
 
 
@@ -727,7 +728,7 @@ class WallexBroker:
             raise RateLimited("local order-create budget exhausted; nothing was sent")
         url = _url(ORDERS_PATH)
         data = json.dumps(sent, separators=(",", ":")).encode("ascii")
-        headers = _headers(key, self._sub_account, json_body=True)
+        headers = _headers(key, self._sub_account)
         what = f"order create {sent['client_id']}"
         failure = None
         try:
