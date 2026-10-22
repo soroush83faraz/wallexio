@@ -29,7 +29,7 @@ From `src/wallexbot/default_config.yaml`, shipped inside the wheel (a plain `pip
 | `universe.max_slippage_bps` | `20` | |
 | `universe.min_depth_multiple` | `5` | Basis not yet fixed in code. |
 | `universe.max_data_age_s` | `30` | Staleness limit for entries; live `bot --interval-s` may be at most half of it. |
-| `risk.risk_per_trade_pct` | `1.0` | |
+| `risk.risk_per_trade_pct` | `3.0` | |
 | `risk.max_position_pct` | `25` | |
 | `risk.max_exposure_pct` | `60` | |
 | `risk.max_open_positions` | `3` | |

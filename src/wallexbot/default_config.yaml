@@ -8,7 +8,7 @@ universe:
   min_depth_multiple: 5
   max_data_age_s: 30
 risk:
-  risk_per_trade_pct: "1.0"
+  risk_per_trade_pct: "3.0"
   max_position_pct: "25"
   max_exposure_pct: "60"
   max_open_positions: 3

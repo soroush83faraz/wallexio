@@ -8,7 +8,7 @@ Values from `src/wallexbot/default_config.yaml`. Percentages are of equity; orde
 
 | Limit | Config key | Default | Notes |
 |---|---|---|---|
-| Risk per trade | `risk.risk_per_trade_pct` | 1.0% | Basis for position sizing (STRATEGY.md) |
+| Risk per trade | `risk.risk_per_trade_pct` | 3.0% | Basis for position sizing (STRATEGY.md) |
 | Max position | `risk.max_position_pct` | 25% | Checked per symbol in `risk/engine.py`; sizing basis in STRATEGY.md not yet fixed |
 | Max exposure | `risk.max_exposure_pct` | 60% | Checked against held plus pending value in `risk/engine.py` |
 | Max open positions | `risk.max_open_positions` | 3 | Dust is flat (see Dust) |
