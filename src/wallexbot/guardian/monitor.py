@@ -27,6 +27,8 @@ One tick:
      no fresh quote for > max_data_age_s                     -> condition stale_feed:<symbols>, no
        kill switch (entries on a stale quote are already refused by the bot and the risk engine)
      no fresh quote for > stale_action_after_s (120 s), held -> per config: hold, or flatten
+       (both: a guardian.alert error row, repeated every 5 min while it lasts, and the symbols in
+       the tick audit event's "held_stale"; deploy/healthcheck.py fails on either)
      (a quote dated > max_quote_future_skew_s after the clock is invalid, never fresh; freshness
      is clamped to now, so a bogus future timestamp or a backward clock step cannot mask a
      frozen feed)
@@ -61,6 +63,8 @@ from wallexbot.types import IntentState, Side
 _ZERO = Decimal(0)
 _HUNDRED = Decimal(100)
 _IN_FLIGHT = frozenset({IntentState.PROPOSED, IntentState.RISK_APPROVED})
+STALE_ALERT_EVERY_S = 300.0     # held / ordered symbol without a fresh quote: re-alert this often
+STALE_ACTIONS = ("hold", "flatten")
 # Kill-switch conditions. LATCHING ones stay engaged until an operator disengages the switch;
 # TRANSIENT ones are engaged with an 'auto:' reason that the guardian itself releases once clear.
 LATCHING_CONDITIONS = frozenset({"balance_mismatch", "breach_eval_error", "daily_loss_soft", "drawdown_soft",
@@ -94,7 +98,7 @@ class GuardianConfig:
     flatten: FlattenConfig = field(default_factory=FlattenConfig)
 
     def __post_init__(self) -> None:
-        if self.stale_action not in ("hold", "flatten"):
+        if self.stale_action not in STALE_ACTIONS:
             raise ValueError(f"stale_action must be 'hold' or 'flatten', not {self.stale_action!r}")
         if not self.max_quote_future_skew_s >= 0:
             raise ValueError("max_quote_future_skew_s must be >= 0")
@@ -141,6 +145,8 @@ class Guardian:
         self._clear_ticks = 0
         self._clear_since: float | None = None
         self._clear_mono: float | None = None
+        self._stale_alert: tuple[float, frozenset[str]] | None = None
+        self._last_quote: dict[str, Any] = {}       # last valid quote per symbol (flatten fallback)
 
     # ------------------------------------------------------------------ public
     def tick(self) -> TickReport:
@@ -172,6 +178,10 @@ class Guardian:
         stale = [s for s, a in ages.items() if a > self.max_age]
         if stale:
             rep.conditions.append("stale_feed:" + ",".join(stale))
+        # Exposed (held or ordered) and without a fresh quote past stale_action_after_s: whatever
+        # the stale_action, this is never silent (a repeated guardian.alert row + the tick audit).
+        held_stale = {s: a for s, a in ages.items() if a > self.cfg.stale_action_after_s}
+        self._held_stale_alert(now, held_stale)
 
         equity, unmarked = self._equity(balances, quotes, positions)
         rep.equity = equity
@@ -236,10 +246,11 @@ class Guardian:
             else:
                 rep.conditions.append("stale_hold")
 
-        key = (tuple(rep.conditions), tuple(rep.actions))
+        key = (tuple(rep.conditions), tuple(rep.actions), tuple(sorted(held_stale)))
         if rep.actions or key != self._last_logged:
             self._audit("tick", {"equity": equity, "sod": sod, "hwm": hwm,
                                  "feed_age_s": None if feed_age is None else round(feed_age, 3),
+                                 "held_stale": sorted(held_stale), "stale_action": self.cfg.stale_action,
                                  "conditions": rep.conditions, "actions": rep.actions,
                                  "flat": None if rep.flatten is None else rep.flatten.flat,
                                  "needs_review": None if rep.flatten is None else rep.flatten.needs_review}, now)
@@ -285,13 +296,33 @@ class Guardian:
                     self._clear_ticks, int(clear_s))
         self._reset_clear()
 
+    def _held_stale_alert(self, now: float, stale: dict[str, float]) -> None:
+        """A guardian.alert error row when a held / ordered symbol first goes without a fresh quote
+        for > stale_action_after_s, again when a symbol joins, and every STALE_ALERT_EVERY_S while
+        it persists (so a 15-minute alert window, deploy/healthcheck.py, stays red)."""
+        if not stale:
+            self._stale_alert = None
+            return
+        last = self._stale_alert
+        if last is not None and frozenset(stale) <= last[1] and 0 <= now - last[0] < STALE_ALERT_EVERY_S:
+            return
+        self._stale_alert = (now, frozenset(stale))
+        syms = ",".join(sorted(stale))
+        age = max(stale.values())
+        self._error("guardian.alert", f"no fresh quote for held/ordered {syms} for {int(age)}s "
+                    f"(> {int(self.cfg.stale_action_after_s)}s); stale_action={self.cfg.stale_action}", now,
+                    {"what": "held_feed_stale", "age_s": {s: round(a, 1) for s, a in sorted(stale.items())},
+                     "stale_action": self.cfg.stale_action})
+        log.error("guardian: no fresh quote for held/ordered %s for %ds (stale_action=%s)", syms, int(age),
+                  self.cfg.stale_action)
+
     def _reset_clear(self) -> None:
         self._clear_row, self._clear_ticks, self._clear_since, self._clear_mono = None, 0, None, None
 
     def _flatten(self, cause: str, hard: bool, reason: str, account: AccountState | None) -> FlattenResult:
         return flatten_all(self.store, self.broker, self.oms, self.ks, cause=cause, hard=hard,
                            config=self.cfg.flatten, clock=self.clock, sleep=self.sleep, account=account,
-                           reason=reason, depth_fn=self.depth_fn)
+                           reason=reason, depth_fn=self.depth_fn, last_quotes=dict(self._last_quote))
 
     def _watch_symbols(self, balances, positions, now: float) -> list[str]:
         rules = self.risk.rules
@@ -345,6 +376,7 @@ class Guardian:
             out[sym] = q
             if q.bid > 0 and q.ask >= q.bid:
                 self._last_fresh[sym] = max(self._last_fresh.get(sym, float("-inf")), min(ts, now))
+                self._last_quote[sym] = q
         return out, future
 
     def _equity(self, balances, quotes, positions) -> tuple[Decimal, list[str]]:

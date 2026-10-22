@@ -17,6 +17,10 @@ Checks (table and column names come from wallexbot/store.py):
     own transient ('auto:') engagement, which the guardian releases itself once the condition has
     been clear for 3 ticks and 60 s. (--fail-on-killswitch is accepted for compatibility; it is the
     default now.)
+  * held position without a feed: the guardian's LATEST tick audit event (actor='guardian',
+    kind='tick', current run) lists in "held_stale" every held / ordered symbol with no fresh
+    quote for > 120 s. Any => unhealthy, whatever the stale action (hold keeps the position). The
+    guardian also re-emits a guardian.alert row every 5 min while it lasts (next check).
   * alerts in the last --alert-window-min minutes (default 15), any of: errors rows whose source
     starts with 'guardian.' (guardian.needs_review, guardian.monitor, guardian.loop, ...),
     audit_events kind 'needs_review', order_intents in state 'needs_review'. Any => unhealthy.
@@ -94,6 +98,13 @@ def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_mi
                 msg += " (transient: the guardian releases it once clear)"
             (warnings if allow_killswitch else problems).append(msg)
 
+        if g.get("enabled") or not run:
+            held = _held_stale(conn)
+            out["held_stale"] = held.get("held_stale", [])
+            if out["held_stale"]:
+                problems.append(f"guardian: held/ordered {','.join(map(str, out['held_stale']))} without a fresh "
+                                f"quote (stale_action={held.get('stale_action')}) as of its latest tick")
+
         since = now - alert_window_min * 60.0
         n_err = conn.execute("SELECT COUNT(*) FROM errors WHERE ts>=? AND source LIKE 'guardian.%'",
                              (since,)).fetchone()[0]
@@ -112,6 +123,21 @@ def check_db(db: str, *, now: float, max_heartbeat_age_s: float, alert_window_mi
         conn.close()
     out["problems"], out["warnings"] = problems, warnings
     return out
+
+
+def _held_stale(conn: sqlite3.Connection) -> dict:
+    """The LATEST guardian tick audit event of the current run (after the bot's latest startup
+    event, if any): {"held_stale": [...], "stale_action": ...}; {} if none or unreadable."""
+    start = conn.execute("SELECT MAX(id) FROM audit_events WHERE actor='bot' AND kind='startup'").fetchone()[0]
+    row = conn.execute("SELECT payload FROM audit_events WHERE actor='guardian' AND kind='tick' AND id>? "
+                       "ORDER BY id DESC LIMIT 1", (start or 0,)).fetchone()
+    try:
+        p = json.loads(row[0]) if row is not None else {}
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(p, dict) or not isinstance(p.get("held_stale"), list):
+        return {}
+    return {"held_stale": p["held_stale"], "stale_action": p.get("stale_action")}
 
 
 def _latest_run(conn: sqlite3.Connection) -> dict:
