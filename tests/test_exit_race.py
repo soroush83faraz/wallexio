@@ -271,3 +271,128 @@ def test_flatten_waits_for_young_proposed_and_ignores_stale(tmp_path):
 
 def test_monitor_in_flight_grace_matches_commit_window():
     assert GuardianConfig().in_flight_grace_s == PROPOSED_COMMIT_WINDOW_S
+
+
+def test_future_dated_proposed_beyond_skew_is_not_young():
+    """race2/race3: a PROPOSED written before a backward clock step is dated in the future. Within
+    the 5 s skew it still counts as young (an actor may be mid-submit); beyond it, it is a leftover
+    that neither blocks exits nor counts as committed."""
+    from wallexbot.oms import PROPOSED_FUTURE_SKEW_S, is_young_proposed
+    from wallexbot.store import IntentRecord
+    i = OrderIntent(SYM, Side.SELL, OrderType.MARKET, D("1.0000"), None, "x:race:f", reduce_only=True)
+
+    def rec(created, state=S.PROPOSED):
+        return IntentRecord(i, state, created, created)
+    now = 1_000_000.0
+    assert is_young_proposed(rec(now), now) and is_young_proposed(rec(now - 29), now)
+    assert not is_young_proposed(rec(now - PROPOSED_COMMIT_WINDOW_S), now)
+    assert is_young_proposed(rec(now + PROPOSED_FUTURE_SKEW_S), now)
+    assert not is_young_proposed(rec(now + PROPOSED_FUTURE_SKEW_S + 0.001), now)
+    assert not is_young_proposed(rec(now + 3600), now)
+    assert not is_young_proposed(rec(float("nan")), now)
+    assert not is_young_proposed(rec(now, S.RISK_APPROVED), now)
+
+
+def test_flatten_ignores_future_dated_leftover_proposed(tmp_path):
+    rig = Rig(tmp_path, guardian_sleep_advances=False)
+    full = rig.held.quantize(D("0.0001"), rounding="ROUND_DOWN")
+    ghost = OrderIntent(SYM, Side.SELL, OrderType.MARKET, full, None, "x:race:ghost", reduce_only=True)
+    rig.store.append_intent(ghost, ts=rig.clock() + 120)        # written before a 120 s backward step
+    g = rig.guardian
+    res = flatten_all(rig.gstore, rig.broker, g.oms, g.ks, cause="t3", hard=True,
+                      config=FlattenConfig(unknown_timeout_s=5.0, poll_interval_s=1.0),
+                      clock=rig.clock, sleep=lambda s: None)
+    assert len(rig.sell_submits) == 1 and res.symbols[SYM].status in ("flat", "dust")
+
+
+# ---------------------------------------------------------------------------- store errors (race2/race3)
+def _lock_during_sell_submit(store, oms):
+    """Another connection takes the write lock right after `store` appends a SELL intent and keeps
+    it until that OMS.submit returns: the risk transaction fails at once (busy_timeout 0) with
+    `database is locked`, the intent stays PROPOSED. One-shot."""
+    store._conn.execute("PRAGMA busy_timeout=0")
+    other = sqlite3.connect(store.path, isolation_level=None, check_same_thread=False)
+    _hook(store, "append_intent", _is_sell, lambda: other.execute("BEGIN IMMEDIATE"))
+    real = oms.submit
+
+    def submit(*a, **k):
+        try:
+            return real(*a, **k)
+        finally:
+            if other.in_transaction:
+                other.execute("COMMIT")
+                store._conn.execute("PRAGMA busy_timeout=5000")
+    oms.submit = submit
+
+
+@pytest.mark.parametrize("step_back", [0, 30, 120])
+@pytest.mark.parametrize("with_guardian", [False, True])
+def test_bot_exit_stuck_proposed_by_lock_is_resumed_next_poll(tmp_path, step_back, with_guardian):
+    """race2/race3: `database is locked` after the bot appended its stop-loss exit left it PROPOSED,
+    and _place_exit refused to stack an exit behind it: the stop was never executed (and, after a
+    backward clock step, the future-dated PROPOSED even blocked the guardian's flatten). Now the
+    next poll resumes the SAME intent: exactly one SELL, within one poll."""
+    rig = Rig(tmp_path)
+    _lock_during_sell_submit(rig.store, rig.oms)
+    rep = rig.bot.tick()
+    assert any(e.startswith("exits:") for e in rep.errors)
+    (stuck,) = [r for r in rig.store.intents_in_states({S.PROPOSED}) if r.intent.side is Side.SELL]
+    assert not rig.sell_submits and not rig.store.rows("risk_decisions")[-1]["client_id"] == stuck.intent.client_id
+    rig.clock.advance(-step_back)
+    rig.clock.advance(15)
+    rig._price(rig.feed.quotes[SYM].bid)
+    rep = rig.bot.tick()
+    assert any(a.startswith(f"exit_resumed:{SYM}:") for a in rep.actions)
+    assert rig.sell_submits == [stuck.intent.client_id]
+    if with_guardian:
+        rig.finish()
+    else:
+        for _ in range(3):
+            rig.clock.advance(15)
+            rig.bot.tick()
+    rig.assert_one_sell()
+    assert rig.store.get_intent(stuck.intent.client_id).state is S.FILLED
+
+
+def test_bot_exit_resume_after_guardian_sold_is_rejected_not_doubled(tmp_path):
+    """The guardian flattened while the bot's exit was stuck PROPOSED: the resumed exit is risk-
+    checked again and rejected (nothing left to sell); no second SELL."""
+    rig = Rig(tmp_path)
+    _lock_during_sell_submit(rig.store, rig.oms)
+    rig.bot.tick()
+    (stuck,) = [r for r in rig.store.intents_in_states({S.PROPOSED}) if r.intent.side is Side.SELL]
+    rig.clock.advance(PROPOSED_COMMIT_WINDOW_S + 1)       # old enough: the guardian may sell
+    rig.guardian_tick()
+    assert len(rig.sell_submits) == 1 and rig.sell_submits[0] != stuck.intent.client_id
+    rig.finish()
+    rig.assert_one_sell()
+    assert rig.store.get_intent(stuck.intent.client_id).state is S.REJECTED
+
+
+def test_guardian_flatten_resumes_its_own_stuck_proposed(tmp_path):
+    rig = Rig(tmp_path)
+    _lock_during_sell_submit(rig.gstore, rig.guardian.oms)     # the bot does not tick here
+    rep = rig.guardian_tick()
+    assert rep.flatten.symbols[SYM].status == "pending" and not rep.flatten.needs_review
+    (stuck,) = [r for r in rig.gstore.intents_in_states({S.PROPOSED}) if r.intent.side is Side.SELL]
+    assert stuck.intent.signal_id.startswith("gflat:") and not rig.sell_submits
+    rig.clock.advance(15)
+    rep = rig.guardian_tick()
+    assert rig.sell_submits == [stuck.intent.client_id]
+    assert rep.flatten.symbols[SYM].status in ("flat", "dust")
+    assert not [r for r in rig.gstore.rows("errors") if r["source"] == "guardian.alert"]
+
+
+def test_bot_settles_its_own_risk_approved_leftover_without_resending(tmp_path):
+    rig = Rig(tmp_path)
+    rig.clock.advance(-60)
+    rig._price(D("100.00"))         # back above the stop: no exit wanted
+    stray = OrderIntent(SYM, Side.SELL, OrderType.MARKET, D("0.0001"), None, "x:stray:0", reduce_only=True)
+    rig.store.append_intent(stray)
+    rig.store.set_intent_state(stray.client_id, S.RISK_APPROVED)
+    rep = rig.bot.tick()
+    assert f"settled:{SYM}:unknown_pending" in rep.actions and not rig.sell_submits
+    rig.clock.advance(60)
+    rig._price(D("100.00"))
+    rig.bot.tick()
+    assert rig.store.get_intent(stray.client_id).state is S.REJECTED and not rig.sell_submits

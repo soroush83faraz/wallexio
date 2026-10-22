@@ -7,9 +7,12 @@ PY       := $(VENV)/bin/python
 RUN_DIR  ?= data/run
 DB       ?= $(RUN_DIR)/bot.db
 BALANCE  ?= 1000
+# wall-clock seconds between shadow ticks; at most max_data_age_s / 2 (15), else the bot exits 2
 INTERVAL ?= 12
 IMAGE    ?= wallexbot:shadow
 PROFILE  ?= strict
+# e.g. HEALTH_ARGS=--allow-killswitch: report an engaged kill switch as a warning instead of failing
+HEALTH_ARGS ?=
 
 .PHONY: help venv test demo backtest shadow guardian docker-build docker-up docker-down healthcheck clean
 
@@ -57,8 +60,9 @@ docker-up:
 docker-down:
 	docker compose down
 
+# Exit 1 if a heartbeat is old, guardian alerts are recent, or the kill switch is engaged.
 healthcheck: $(PY)
-	$(PY) deploy/healthcheck.py --db $(DB)
+	$(PY) deploy/healthcheck.py --db $(DB) $(HEALTH_ARGS)
 
 clean:
 	rm -rf .pytest_cache build *.egg-info src/*.egg-info

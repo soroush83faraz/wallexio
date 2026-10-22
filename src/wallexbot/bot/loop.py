@@ -6,9 +6,13 @@ Invariants:
   (balances) and cancels of resting orders (pipeline.cancel_open_intent, OMS.cancel_stale) only.
 - No duplicate orders. Entry: the plan (keyed by the deterministic signal_id) is persisted BEFORE
   the intent is handed to the OMS, and a signal_id that has a plan is never planned again; the
-  OMS refuses a client_id it has seen. Exit: no new exit for a symbol while ANY non-terminal SELL
-  intent exists for it (the bot's or the guardian's); exit signal_ids are x:<position key>:<n>
-  with n = durable count of earlier exit intents for the position.
+  OMS refuses a client_id it has seen. Exit: no new exit for a symbol while any non-terminal SELL
+  intent that may still reach the exchange exists for it (the bot's or the guardian's; a PROPOSED
+  counts only while young, oms.is_young_proposed); the bot's OWN PROPOSED exit for the position is
+  resumed (same client_id), never replaced. Exit signal_ids are x:<position key>:<n> with n =
+  durable count of earlier exit intents for the position.
+- Store errors (e.g. `database is locked`) on the order path are retried on the next poll: the
+  settle stage moves this loop's leftovers on (_settle_own) and _place_exit resumes its exit.
 - Stops survive restarts: position state (stops, highest high, bars held, partial flag, pending
   exit request) and the cooldown tracker are appended to the store on every change (bot/state.py)
   and reloaded on startup, then reconciled with the OMS ledger and exchange balances.
@@ -48,6 +52,7 @@ from wallexbot.clockstep import StepAnchors
 from wallexbot.config import Config
 from wallexbot.data.candles import Candle
 from wallexbot.dust import is_dust, min_notional_for
+from wallexbot.oms import is_young_proposed
 from wallexbot.pipeline import cancel_open_intent, route_to_oms, snapshot_account
 from wallexbot.risk.engine import AccountState, utc_day
 from wallexbot.strategy.config import MomentumParams
@@ -169,7 +174,8 @@ class Bot:
             self._stage("startup", self._startup, now, rep)
             if not self.started:
                 return  # never trade without the persisted state
-        for name, fn in (("feed", self._refresh_feed), ("reconcile", self._reconcile), ("sync", self._sync),
+        for name, fn in (("feed", self._refresh_feed), ("reconcile", self._reconcile),
+                         ("settle", self._settle_own), ("sync", self._sync),
                          ("bars", self._on_bars), ("protect", self._protect), ("exits", self._work_exits),
                          ("sync", self._sync)):
             self._stage(name, fn, now, rep)
@@ -185,8 +191,8 @@ class Bot:
     def _count_failures(self, now: float, rep: TickReport) -> None:
         self.consecutive_failures = self.consecutive_failures + 1 if rep.errors else 0
         rep.consecutive_failures = self.consecutive_failures
-        if self.consecutive_failures >= self.p.max_consecutive_failures and not self.ks.is_engaged():
-            self.ks.engage(f"bot: {self.consecutive_failures} consecutive tick failures", actor=ACTOR, ts=now)
+        if self.consecutive_failures >= self.p.max_consecutive_failures and self.ks.engage_unless_held(
+                f"bot: {self.consecutive_failures} consecutive tick failures", actor=ACTOR, ts=now):
             self._decision("engage_kill_switch", {"consecutive_failures": self.consecutive_failures,
                                                   "errors": rep.errors}, now)
             rep.engaged_kill_switch = True
@@ -245,6 +251,55 @@ class Bot:
                 self._decision("exit_limit_timeout", {"client_id": i.client_id, "symbol": i.symbol,
                                                       "state": st.value if st else None}, now)
                 rep.actions.append("exit_limit_canceled")
+
+    def _settle_own(self, now: float, rep: TickReport) -> None:
+        """THIS loop's intents that an earlier poll left mid-submit because OMS.submit raised (e.g.
+        `database is locked` after the 5 s busy timeout). The bot is the only non-guardian actor on
+        its database and submits from this thread only, so none of them is in flight here:
+        - RISK_APPROVED (may have been sent) -> UNKNOWN_PENDING, never resent; reconcile resolves it;
+        - PROPOSED entry (never sent): resumed with a fresh quote and risk check while younger than
+          entry_ioc_s, otherwise rejected;
+        - PROPOSED exit of a tracked position with an exit request: _place_exit resumes it;
+        - any other PROPOSED: rejected (never sent).
+        Retried every poll, not every bar."""
+        failed = []
+        for rec in self.store.intents_in_states({S.PROPOSED, S.RISK_APPROVED}):
+            i = rec.intent
+            if i.signal_id.startswith(GUARDIAN_PREFIX):
+                continue
+            tp = self.positions.get(i.symbol)
+            plan = next((p for p in self.plans.values() if p.client_id == i.client_id), None)
+            try:
+                if rec.state is S.RISK_APPROVED:
+                    self._settle(rec, S.UNKNOWN_PENDING, "bot_settle_mid_submit", now, rep)
+                elif i.side is Side.SELL and tp is not None and tp.exit_request is not None \
+                        and i.signal_id.startswith(exit_prefix(tp.key)):
+                    continue                     # _place_exit resumes it, after this poll's stop checks
+                elif i.side is Side.BUY and plan is not None and 0 <= now - rec.created_at <= self.p.entry_ioc_s:
+                    self._resume_own(rec, now, rep)
+                else:
+                    self._settle(rec, S.REJECTED, "bot_abandoned_unsent", now, rep)
+            except Exception as e:   # e.g. still locked: retried next poll
+                failed.append(f"{i.client_id}:{type(e).__name__}")
+                self._error("settle", f"{i.client_id}: {e!r}", now)
+        if failed:
+            raise RuntimeError("could not settle: " + ",".join(failed))
+
+    def _resume_own(self, rec, now: float, rep: TickReport) -> None:
+        """Resume this loop's PROPOSED entry: the SAME intent (same client_id) through the order
+        path again; OMS.submit re-runs the risk check on the current quote and sends at most once."""
+        i = rec.intent
+        q = self.feed.quote(i.symbol)
+        res = route_to_oms(self.oms, i, q, self._account(now, {i.symbol: q} if q is not None else {}), now)
+        self._decision("entry_resumed", {"symbol": i.symbol, "signal_id": i.signal_id, "client_id": i.client_id,
+                                         "state": res.state.value, "sent": res.sent}, now)
+        rep.actions.append(f"entry_resumed:{i.symbol}:{res.state.value}")
+
+    def _settle(self, rec, new: IntentState, reason: str, now: float, rep: TickReport) -> None:
+        self.store.set_intent_state(rec.intent.client_id, new, expected=rec.state, reason=reason, ts=now)
+        self._decision("intent_settled", {"symbol": rec.intent.symbol, "client_id": rec.intent.client_id,
+                                          "from": rec.state.value, "to": new.value, "reason": reason}, now)
+        rep.actions.append(f"settled:{rec.intent.symbol}:{new.value}")
 
     def _sync(self, now: float, rep: TickReport) -> None:
         """Ledger -> tracked positions: adopt filled entries, adopt orphans, close flat positions."""
@@ -585,7 +640,21 @@ class Bot:
         if rules is None:
             return self._flag(tp, "no_symbol_rules", now)
         recs = [r for r in self.store.intents_in_states(_ALL_STATES) if r.intent.symbol == sym]
-        if any(r.intent.side is Side.SELL and r.state not in TERMINAL_STATES for r in recs):
+        own = [r for r in recs if r.intent.side is Side.SELL and r.state is S.PROPOSED
+               and r.intent.signal_id.startswith(exit_prefix(tp.key))]
+        if own:
+            # Our earlier submit raised before the risk step: resume THAT intent (same client_id),
+            # never a new one. OMS.submit re-runs the risk check, which rejects it if the position
+            # was sold meanwhile, and sends at most once.
+            i = own[0].intent
+            res = route_to_oms(self.oms, i, self.feed.quote(sym), self._exit_account(now), now)
+            self._decision("exit_resumed", {"symbol": sym, "signal_id": tp.key, "client_id": i.client_id,
+                                            "type": i.type.value, "quantity": i.quantity,
+                                            "state": res.state.value, "sent": res.sent}, now)
+            rep.actions.append(f"exit_resumed:{sym}:{res.state.value}")
+            return
+        if any(r.intent.side is Side.SELL and r.state not in TERMINAL_STATES
+               and (r.state is not S.PROPOSED or is_young_proposed(r, now)) for r in recs):
             return  # never stack exits: wait for the in-flight one (stale LIMITs are canceled)
         ledger_qty = self.oms.positions().get(sym, Position(sym)).quantity
         want = round_down(ledger_qty - req.target_qty, rules.amount_precision)

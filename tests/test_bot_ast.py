@@ -3,7 +3,8 @@
 Complements tests/test_single_order_path_ast.py (which scans all of src/wallexbot, bot/ included):
 - nothing in bot/ references submit_order, calls a `.submit(...)` method or any submit-like name;
 - bot/ never imports the broker modules (exchange.base / mock_wallex / wallex_private) nor ai/;
-- route_to_oms is called from exactly two reviewed scopes of loop.py (entry and exit placement);
+- route_to_oms is called from exactly three reviewed scopes of loop.py (entry and exit placement, and
+  resuming the bot's own interrupted PROPOSED entry);
 - pipeline.route_to_oms itself does nothing but return oms.submit(...);
 - risk/, oms.py and exchange/ never import the advisor package (wallexbot.ai) or bot/.
 """
@@ -12,7 +13,9 @@ from pathlib import Path
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "wallexbot"
 BOT = SRC / "bot"
-SEND_SCOPES = {("Bot", "_enter"), ("Bot", "_place_exit")}
+# scope -> number of route_to_oms calls in it. _place_exit: a new exit, or its own PROPOSED exit
+# resumed; _resume_own: the bot's own interrupted PROPOSED entry (the same intent again).
+SEND_SCOPES = {("Bot", "_enter"): 1, ("Bot", "_place_exit"): 2, ("Bot", "_resume_own"): 1}
 FORBIDDEN_IMPORTS = ("wallexbot.exchange.base", "wallexbot.exchange.mock_wallex", "wallexbot.exchange.wallex_private",
                      "wallexbot.ai")
 
@@ -62,7 +65,7 @@ def test_bot_has_no_order_entry_of_its_own():
         for mod in _imports(tree):
             assert not mod.startswith(FORBIDDEN_IMPORTS), f"{rel} imports {mod}"
             assert mod.split(".")[-1] not in ("MockWallex", "WallexBroker"), f"{rel} imports {mod}"
-    assert sorted(route_calls) == sorted(("bot/loop.py", s) for s in SEND_SCOPES)
+    assert sorted(route_calls) == sorted(("bot/loop.py", s) for s, n in SEND_SCOPES.items() for _ in range(n))
 
 
 def test_route_to_oms_is_a_bare_pass_through_to_oms_submit():

@@ -24,6 +24,10 @@ Invariants (why this can never double-sell or run away):
   crash leftover that never reached the broker: it neither blocks nor counts as committed. The OMS
   risk transaction is the second layer: it counts young PROPOSED SELLs inserted earlier as
   committed, so even a racing pair of exits cannot both be approved for the full position.
+- Store errors. An exit of this episode left PROPOSED / RISK_APPROVED by a pass whose OMS.submit
+  raised (e.g. `database is locked`) is handed to OMS.submit again on the next pass: a PROPOSED is
+  risk-checked anew and sent at most once, a RISK_APPROVED becomes unknown_pending (never resent).
+  A store error in a pass leaves the symbol "pending" (no needs_review); the next tick retries.
 - Deterministic identity. signal_id = gflat:<UTC day>-<cause>:<symbol>:<n>, where n is the number
   of intents this episode already holds for the symbol (durable state). With the same durable
   state a re-run builds the same client_id, which the OMS refuses to send twice.
@@ -42,6 +46,7 @@ broker modules; it receives the broker object (reads, cancels) and the OMS (the 
 from __future__ import annotations
 
 import logging
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -186,6 +191,11 @@ class _Flattener:
         for sym in self._symbols():
             try:
                 res.symbols[sym] = self._flatten_symbol(sym)
+            except sqlite3.OperationalError as e:   # busy / locked store: the next guardian tick retries
+                out = SymbolOutcome(sym, status="pending", reason="store_error_retry_next_tick",
+                                    notes=[f"error:{type(e).__name__}"])
+                self._error("guardian.flatten", f"{sym}: store error, retried next tick: {e!r}")
+                res.symbols[sym] = out
             except Exception as e:  # one symbol's failure must not stop the others
                 out = SymbolOutcome(sym, notes=[f"error:{type(e).__name__}"])
                 self._error("guardian.flatten", f"{sym}: {e!r}")
@@ -205,10 +215,10 @@ class _Flattener:
 
     # ------------------------------------------------------------------ steps 1 and 2
     def _engage(self, now: float) -> None:
-        if self.ks.is_engaged():
-            return
-        self.ks.engage(f"guardian:flatten:{self.episode}:{self.reason}", actor=ACTOR, ts=now)
-        self._audit("engage_kill_switch", {"episode": self.episode, "why": "flatten"})
+        # A flatten is never transient: it supersedes an auto (transient) engagement, so the
+        # guardian's auto-release can never clear the switch after a flatten.
+        if self.ks.engage_unless_held(f"guardian:flatten:{self.episode}:{self.reason}", actor=ACTOR, ts=now):
+            self._audit("engage_kill_switch", {"episode": self.episode, "why": "flatten"})
 
     def _cancel_entries(self) -> tuple[list[str], bool]:
         canceled: list[str] = []
@@ -259,6 +269,12 @@ class _Flattener:
                 return self._give_up(out, "max_failed_attempts")
             if len(mine) >= self.cfg.max_orders_per_symbol:
                 return self._give_up(out, "max_orders_per_symbol")
+            # This episode's own exit left mid-submit by an earlier pass (OMS.submit raised, e.g.
+            # `database is locked`): one guardian per database, so nothing else is submitting it.
+            stuck = next((x for x in mine if x.state in (S.PROPOSED, S.RISK_APPROVED)), None)
+            if stuck is not None:
+                self._place_exit(sym, None, len(mine), False, out, resume=stuck)
+                continue
             blocking = self._blocking_exits(sym)
             if blocking:
                 if not all([self._settle(r) for r in blocking]):
@@ -366,33 +382,40 @@ class _Flattener:
         return None
 
     # ------------------------------------------------------------------ order placement
-    def _place_exit(self, sym: str, snap: dict[str, Decimal], n: int, escalate: bool,
-                    out: SymbolOutcome) -> bool:
+    def _place_exit(self, sym: str, snap: dict[str, Decimal] | None, n: int, escalate: bool,
+                    out: SymbolOutcome, resume: IntentRecord | None = None) -> bool:
+        """Place exit #n, or (resume) hand this episode's own interrupted intent to OMS.submit again:
+        a PROPOSED one is risk-checked anew and sent at most once, a RISK_APPROVED one is moved to
+        unknown_pending (never resent). True iff something new was handed to the OMS."""
         r = self.rules[sym]
         try:
             quote = self.broker.quote(sym)
         except Exception as e:
             self._error("guardian.flatten", f"{sym} quote failed: {e!r}")
             return False
-        typ, price, floor, why = self._order_shape(r, quote.bid, escalate)
-        try:
-            levels = list(self.depth_fn(sym))
-        except Exception:
-            levels = None
-        if levels is None:
-            # Unknown depth: never a MARKET of unknown impact; a LIMIT bounds the worst price.
-            typ, price, floor, why = self._order_shape(r, quote.bid, False)
-            qty = snap["sellable"]
-            why += ",depth_unavailable"
+        if resume is not None:
+            intent, why = resume.intent, f"resume_{resume.state.value}"
         else:
-            visible = sum((q for p, q in levels if p >= floor), _ZERO)
-            qty = min(snap["sellable"], round_down(visible * self.cfg.max_depth_fraction, r.amount_precision))
-        if qty <= 0:
-            out.notes.append("no_visible_depth")
-            return False
-        intent = OrderIntent(sym, Side.SELL, typ, qty, price, f"{PREFIX}:{self.episode}:{sym}:{n}",
-                             reduce_only=True)
-        existed = self.store.get_intent(intent.client_id) is not None
+            typ, price, floor, why = self._order_shape(r, quote.bid, escalate)
+            try:
+                levels = list(self.depth_fn(sym))
+            except Exception:
+                levels = None
+            if levels is None:
+                # Unknown depth: never a MARKET of unknown impact; a LIMIT bounds the worst price.
+                typ, price, floor, why = self._order_shape(r, quote.bid, False)
+                qty = snap["sellable"]
+                why += ",depth_unavailable"
+            else:
+                visible = sum((q for p, q in levels if p >= floor), _ZERO)
+                qty = min(snap["sellable"], round_down(visible * self.cfg.max_depth_fraction, r.amount_precision))
+            if qty <= 0:
+                out.notes.append("no_visible_depth")
+                return False
+            intent = OrderIntent(sym, Side.SELL, typ, qty, price, f"{PREFIX}:{self.episode}:{sym}:{n}",
+                                 reduce_only=True)
+        typ, qty, price = intent.type, intent.quantity, intent.price
+        existed = resume is None and self.store.get_intent(intent.client_id) is not None
         res = self.oms.submit(intent, quote, self.account, now=self._now())
         out.orders.append(intent.client_id)
         self._audit("flatten_exit", {"episode": self.episode, "symbol": sym, "client_id": intent.client_id,
