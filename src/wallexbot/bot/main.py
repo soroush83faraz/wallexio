@@ -115,13 +115,18 @@ def make_broker(mode: str, *, config: Config, clock: Callable[[], float], rules:
 
 def fresh_depth_source(feed, clock: Callable[[], float], max_age_s: float = BOOK_MAX_AGE_S) -> Callable[[str], Any]:
     """Book source for ShadowBroker that REUSES the feed's cached public depth (no extra requests).
-    No book, or one older than `max_age_s`, raises: the broker then books a book_error and moves nothing."""
+    No book, one older than `max_age_s`, or one dated after the clock (its ts is the local receive
+    time, so a future ts means the clock stepped back or the data is bad) raises: the broker then
+    books a book_error and moves nothing."""
     def source(symbol: str):
         d = feed.depth(symbol)
         if d is None:
             raise LookupError(f"no depth cached for {symbol}")
-        if clock() - d.ts > max_age_s:
-            raise LookupError(f"cached depth for {symbol} is stale ({clock() - d.ts:.0f}s old)")
+        age = float(clock()) - float(d.ts)
+        if not age >= 0:       # also NaN
+            raise LookupError(f"cached depth for {symbol} is dated after the clock; not a valid book")
+        if age > max_age_s:
+            raise LookupError(f"cached depth for {symbol} is stale ({age:.0f}s old)")
         return d
     return source
 

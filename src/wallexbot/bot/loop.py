@@ -18,6 +18,10 @@ Invariants:
 - Entries only on a NEW closed 15m bar, and only with fresh data (quote age <= max_data_age_s,
   bars lagging the clock by <= max_bar_lag_bars). Exits: strategy decisions on new bars, software
   stop / take-profit checks on every poll, stale data or not.
+- Backward clock step / future-dated data fails closed: a quote dated after the clock is not
+  fresh, a bar not yet closed by the clock is skipped (`bars_future`), and timers on stored
+  timestamps (LIMIT exit timeout, OMS stale-entry cancel, feed retries) re-anchor to the new clock
+  instead of stalling until it catches up (wallexbot/clockstep.py).
 
 Per tick: heartbeat -> (startup) -> feed refresh -> reconcile, cancel stale entry orders (emulated
 IOC, 20 s) and stale LIMIT exits (10 s) -> sync positions with the ledger -> new-bar work (exit
@@ -40,6 +44,7 @@ from wallexbot.bot.advice import AdvisorGate
 from wallexbot.bot.feed import BAR_S, notional_within
 from wallexbot.bot.state import (ACTOR, EXIT_PREFIX, BotState, EntryPlan, ExitRequest, TrackedPosition,
                                  exit_prefix, exit_signal_id)
+from wallexbot.clockstep import StepAnchors
 from wallexbot.config import Config
 from wallexbot.data.candles import Candle
 from wallexbot.dust import is_dust, min_notional_for
@@ -131,6 +136,7 @@ class Bot:
         self.ticks = 0
         self._stale_noted: dict[str, int] = {}
         self._retry_noted: set[tuple[str, int, str]] = set()
+        self._exit_age = StepAnchors()      # resting LIMIT exit age (backward-clock-step safe)
 
     # ================================================================== tick
     def tick(self) -> TickReport:
@@ -222,10 +228,12 @@ class Bot:
         for cid in self.oms.cancel_stale(self.p.entry_ioc_s, now):
             self._decision("entry_ioc_canceled", {"client_id": cid}, now)
             rep.actions.append("entry_ioc_canceled")
-        for rec in self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED}):
+        resting = self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED})
+        self._exit_age.keep_only(r.intent.client_id for r in resting)
+        for rec in resting:
             i = rec.intent
             if (i.reduce_only and i.type is OrderType.LIMIT and i.signal_id.startswith(EXIT_PREFIX + ":")
-                    and now - rec.created_at > self.p.exit_limit_timeout_s):
+                    and self._exit_age.elapsed(i.client_id, rec.created_at, now) > self.p.exit_limit_timeout_s):
                 st = cancel_open_intent(self.oms, i.client_id, now)
                 self._decision("exit_limit_timeout", {"client_id": i.client_id, "symbol": i.symbol,
                                                       "state": st.value if st else None}, now)
@@ -263,6 +271,11 @@ class Bot:
         for sym in sorted(universe | set(self.positions)):
             bars = self.feed.closed_bars(sym, self.p.history_bars)
             if not bars or bars[-1].ts <= self.bars_done.get(sym, -1):
+                continue
+            if not bars[-1].ts <= boundary:   # not closed by our clock (clock stepped back / bad data)
+                if self._stale_noted.get(sym) != boundary:
+                    self._stale_noted[sym] = boundary
+                    self._decision("abstain", {"symbol": sym, "bar_ts": bars[-1].ts, "reason": "bars_future"}, now)
                 continue
             if (boundary - bars[-1].ts) // B > self.p.max_bar_lag_bars:
                 if self._stale_noted.get(sym) != boundary:
@@ -697,6 +710,7 @@ class Bot:
         return pos is not None and not self._is_dust(sym, pos)
 
     def _fresh(self, q: Quote | None, now: float) -> bool:
+        """Age in [0, max_data_age_s]: a quote dated after the clock is invalid, never fresh."""
         return q is not None and 0 <= now - q.ts <= self.cfg.max_data_age_s and q.bid > 0 and q.ask >= q.bid
 
     def _account(self, now: float, extra: Mapping[str, Quote]) -> AccountState:

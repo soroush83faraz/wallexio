@@ -203,6 +203,7 @@ class PublicFeed(_FeedBase):
 
     def refresh(self, now: float) -> None:
         p = self.params
+        self._reanchor(now)
         self._spent = 0
         self.last_errors = []
         attempted = ok = 0
@@ -232,6 +233,20 @@ class PublicFeed(_FeedBase):
             raise FeedError("every market-data request of this refresh failed: " + ",".join(self.last_errors[:5]))
 
     # ---- internals
+    def _reanchor(self, now: float) -> None:
+        """Backward clock step: a retry/refresh timestamp after `now` would stall its timer
+        (`now - last >= interval` stays false until the clock catches up). Clamp every one to `now`,
+        so each timer re-anchors to the new clock and runs one full interval (exchange/ratelimit.py
+        clamps its token bucket the same way)."""
+        if self._universe_ts is not None and not self._universe_ts <= now:
+            self._universe_ts = now
+        if self._universe_try is not None and not self._universe_try <= now:
+            self._universe_try = now
+        for timers in (self._depth_try, self._candle_try):
+            for sym, last in list(timers.items()):
+                if not last <= now:
+                    timers[sym] = now
+
     def _spend(self, n: int) -> bool:
         if self._spent + n > self.params.max_requests_per_refresh:
             return False

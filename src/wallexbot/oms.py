@@ -20,6 +20,8 @@ Invariants:
   ignored here and recover() settles it. A PROPOSED dated in the future (clock stepped back) counts
   as young: fail closed. For a given intent only PROPOSED SELLs inserted BEFORE it count (store
   insertion order), so of two racing exits the earlier one wins and they never block each other.
+- Timers on stored timestamps (not-found grace, stale-entry cancel) use clockstep.StepAnchors: a
+  timestamp after `now` (backward clock step) re-anchors the timer at `now` instead of stalling it.
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ from decimal import (ROUND_HALF_EVEN, Context, Decimal, DecimalException, Divisi
                      InvalidOperation, Overflow, localcontext)
 from typing import Callable
 
+from wallexbot.clockstep import StepAnchors
 from wallexbot.exchange.base import BrokerOrder, OrderRejected, OrderStatus, RateLimited
 from wallexbot.risk.engine import AccountState, RiskDecision
 from wallexbot.store import IntentRecord, Store
@@ -149,6 +152,8 @@ class OMS:
         self.approve = approve
         self.clock = clock
         self.not_found_grace_s = not_found_grace_s
+        self._grace = StepAnchors()     # not-found grace per client_id (updated_at)
+        self._age = StepAnchors()       # resting-entry age per client_id (created_at)
 
     # ------------------------------------------------------------------ views
     def positions(self) -> dict[str, Position]:
@@ -234,6 +239,7 @@ class OMS:
             self.store.append_error("oms.reconcile", f"open_orders failed: {e!r}", ts=now)
             open_by_id = None
         out: dict[str, IntentState] = {}
+        self._grace.keep_only(r.intent.client_id for r in pending)
         for rec in pending:
             cid = rec.intent.client_id
             try:
@@ -250,7 +256,7 @@ class OMS:
             elif open_by_id is None:
                 pass  # absence not confirmed by both lookups: stay as is
             elif rec.state is S.UNKNOWN_PENDING:
-                if now - rec.updated_at >= self.not_found_grace_s:
+                if self._grace.elapsed(cid, rec.updated_at, now) >= self.not_found_grace_s:
                     self.store.append_broker_event(cid, "reconcile_not_found", None, ts=now)
                     self._cas(cid, S.UNKNOWN_PENDING, S.REJECTED, "not_found_at_exchange", now)
             else:  # the exchange acknowledged this order earlier and now has no record of it
@@ -272,8 +278,10 @@ class OMS:
         """Cancel resting ENTRY orders older than max_age_s. Returns client_ids canceled."""
         now = self._now(now)
         done = []
-        for rec in self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED}):
-            if rec.intent.reduce_only or now - rec.created_at <= max_age_s:
+        resting = self.store.intents_in_states({S.SUBMITTED, S.PARTIALLY_FILLED})
+        self._age.keep_only(r.intent.client_id for r in resting)
+        for rec in resting:
+            if rec.intent.reduce_only or self._age.elapsed(rec.intent.client_id, rec.created_at, now) <= max_age_s:
                 continue
             cid = rec.intent.client_id
             try:
