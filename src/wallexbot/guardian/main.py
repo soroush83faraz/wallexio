@@ -239,10 +239,10 @@ def run_guardian(db_path: str | Path, broker, rules: Mapping[str, SymbolRules], 
 
 def _engage_for_failures(g: Guardian, n: int) -> bool:
     try:
-        if g.ks.is_engaged():  # read errors count as engaged (fail closed): nothing to add
-            return False
         now = float(g.clock())
-        g.ks.engage(f"guardian: {n} consecutive tick failures", actor=ACTOR, ts=now)
+        # not transient: supersedes an auto engagement; read errors count as held (fail closed)
+        if not g.ks.engage_unless_held(f"guardian: {n} consecutive tick failures", actor=ACTOR, ts=now):
+            return False
         g.store.append_audit_event(ACTOR, "engage_kill_switch", {"reasons": [f"tick_failures:{n}"]}, ts=now)
         return True
     except Exception:

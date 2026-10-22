@@ -137,7 +137,14 @@ def test_hard_daily_loss_breach_flattens(rig, gstore, make):
 
 
 # ------------------------------------------------------------------ stale feed
-def test_stale_feed_freezes_entries_then_holds_by_default(rig, make):
+def entry_refused_stale(rig):
+    res = rig.submit(OrderIntent(SYM, Side.BUY, OrderType.MARKET, D("0.001000"), None, f"probe-{rig.clock()}"))
+    return res.state is S.REJECTED and "quote_stale" in res.decision.reasons
+
+
+def test_stale_feed_on_a_held_symbol_reports_without_kill_switch_then_holds(rig, make):
+    """Staleness is not a kill-switch reason (it used to latch the switch forever): entries on a
+    stale quote are refused by the risk engine (and the bot) per symbol anyway."""
     buy(rig)
     live(rig, 1)
     g = make()
@@ -145,8 +152,8 @@ def test_stale_feed_freezes_entries_then_holds_by_default(rig, make):
     rig.clock.advance(31)                    # > max_data_age_s (30): no fresh quote
     rig.store.heartbeat("strategy")
     rep = g.tick()
-    assert rep.conditions == ["stale_feed"] and "engage_kill_switch" in rep.actions
-    assert "stale_feed" in rig.store.latest_killswitch().reason
+    assert rep.conditions == [f"stale_feed:{SYM}"] and rep.actions == []
+    assert not rig.ks.is_engaged() and entry_refused_stale(rig)
     rig.clock.advance(100)                   # > 120 s stale with a position: hold (default)
     rig.store.heartbeat("strategy")
     rep = g.tick()
@@ -184,8 +191,8 @@ def test_future_dated_quote_is_not_fresh_and_a_frozen_feed_still_goes_stale(rig,
         rig.clock.advance(600)
         rig.store.heartbeat("strategy")
         rep = g.tick()
-    assert "stale_feed" in rep.conditions and "stale_hold" in rep.conditions
-    assert rig.ks.is_engaged() and entry_blocked(rig)
+    assert f"stale_feed:{SYM}" in rep.conditions and "stale_hold" in rep.conditions
+    assert not rig.ks.is_engaged() and entry_refused_stale(rig)
     errors = [r for r in gstore.rows("errors") if "ahead of the clock" in r["message"]]
     assert len(errors) == 1                                  # logged once, not every tick
 
@@ -201,15 +208,59 @@ def test_backward_clock_step_cannot_keep_a_symbol_fresh(rig, make):
     rig.clock.advance(31)                                    # 31 s of frozen feed on the new clock
     rig.store.heartbeat("strategy")
     rep = g.tick()
-    assert "stale_feed" in rep.conditions and rig.ks.is_engaged()
+    assert f"stale_feed:{SYM}" in rep.conditions and not rig.ks.is_engaged()
 
 
 def test_stale_feed_does_not_move_sod_or_hwm(rig, gstore, make):
+    buy(rig)
     g = make()
+    before = gstore.equity_hwm()
     rig.clock.advance(31)
-    rig.broker._free["USDT"] += D("5000")     # a new high, but the feed is stale
-    g.tick()
-    assert gstore.equity_hwm() is None
+    rig.broker._free["USDT"] += D("5000")     # a new high, but the held symbol's feed is stale
+    assert f"stale_feed:{SYM}" in g.tick().conditions
+    assert gstore.equity_hwm() == before and before < D("10001")
+    assert gstore.sod_equity(utc_day(rig.clock())) is None or gstore.sod_equity(utc_day(rig.clock())) < D("10001")
+
+
+# ------------------------------------------------------------------ staleness only where exposed
+def test_universe_only_stale_quote_never_engages_the_kill_switch(rig, make):
+    """Verifier stale.py: a universe-only symbol (nothing held, no order) silent for > 30 s latched
+    the kill switch, and nothing ever released it."""
+    g = make()
+    for _ in range(3):
+        live(rig, 12)
+        assert g.tick().conditions == []
+    for _ in range(10):                      # ETH silent for 2 minutes; BTC fresh; nothing held
+        rig.clock.advance(12)
+        rig.broker.set_price(SYM, BID, ASK)
+        rig.store.heartbeat("strategy")
+        rep = g.tick()
+        assert not any(c.startswith("stale_feed") for c in rep.conditions)
+    assert not rig.ks.is_engaged() and rig.store.latest_killswitch() is None
+
+
+def test_nothing_held_never_acts_on_feed_age(rig, gstore, make):
+    g = make(stale_action="flatten")
+    for _ in range(5):                       # the whole feed is frozen, nothing held or ordered
+        rig.clock.advance(300)
+        rig.store.heartbeat("strategy")
+        rep = g.tick()
+        assert rep.conditions == [] and rep.actions == []
+    assert rig.store.latest_killswitch() is None
+
+
+def test_live_order_makes_its_symbol_watched_for_staleness(rig, make):
+    rig.broker.set_price("ETHUSDT", D("3000.00"), D("3001.00"))
+    res = rig.oms.submit(OrderIntent("ETHUSDT", Side.BUY, OrderType.LIMIT, D("0.1000"), D("2900.00"), "rest-1"),
+                         rig.broker.quote("ETHUSDT"), rig.account())
+    assert res.state is S.SUBMITTED
+    g = make()
+    live(rig, 1)
+    rig.clock.advance(40)                    # BTC fresh (nothing held), ETH has a resting order and goes stale
+    rig.broker.set_price(SYM, BID, ASK)
+    rig.store.heartbeat("strategy")
+    rep = g.tick()
+    assert "stale_feed:ETHUSDT" in rep.conditions and not rig.ks.is_engaged()
 
 
 def test_invalid_stale_action_refused():

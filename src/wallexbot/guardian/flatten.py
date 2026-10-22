@@ -215,10 +215,10 @@ class _Flattener:
 
     # ------------------------------------------------------------------ steps 1 and 2
     def _engage(self, now: float) -> None:
-        if self.ks.is_engaged():
-            return
-        self.ks.engage(f"guardian:flatten:{self.episode}:{self.reason}", actor=ACTOR, ts=now)
-        self._audit("engage_kill_switch", {"episode": self.episode, "why": "flatten"})
+        # A flatten is never transient: it supersedes an auto (transient) engagement, so the
+        # guardian's auto-release can never clear the switch after a flatten.
+        if self.ks.engage_unless_held(f"guardian:flatten:{self.episode}:{self.reason}", actor=ACTOR, ts=now):
+            self._audit("engage_kill_switch", {"episode": self.episode, "why": "flatten"})
 
     def _cancel_entries(self) -> tuple[list[str], bool]:
         canceled: list[str] = []

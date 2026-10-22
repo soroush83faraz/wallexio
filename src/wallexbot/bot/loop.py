@@ -191,8 +191,8 @@ class Bot:
     def _count_failures(self, now: float, rep: TickReport) -> None:
         self.consecutive_failures = self.consecutive_failures + 1 if rep.errors else 0
         rep.consecutive_failures = self.consecutive_failures
-        if self.consecutive_failures >= self.p.max_consecutive_failures and not self.ks.is_engaged():
-            self.ks.engage(f"bot: {self.consecutive_failures} consecutive tick failures", actor=ACTOR, ts=now)
+        if self.consecutive_failures >= self.p.max_consecutive_failures and self.ks.engage_unless_held(
+                f"bot: {self.consecutive_failures} consecutive tick failures", actor=ACTOR, ts=now):
             self._decision("engage_kill_switch", {"consecutive_failures": self.consecutive_failures,
                                                   "errors": rep.errors}, now)
             rep.engaged_kill_switch = True

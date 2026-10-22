@@ -9,7 +9,7 @@ touches the broker's order entry: exits go through OMS.submit inside flatten.py.
 
 One tick:
 1. oms.reconcile() so the ledger reflects every known order (ambiguous ones included).
-2. Read balances, open orders and a quote per symbol of the risk universe from the broker.
+2. Read balances, open orders and a quote per watched symbol (held, ordered, or in the universe).
 3. Equity = quote-currency balance (free + locked) + base holdings (free + locked) x bid.
    Start-of-day equity is the first snapshot per UTC day (store.append_equity_sod: first write
    wins), the high-water mark is appended when exceeded. Both are written only from fresh,
@@ -21,14 +21,23 @@ One tick:
    - exchange base balance != OMS ledger beyond tolerance,
      on `mismatch_confirm_ticks` consecutive ticks            -> kill switch + needs_review
      (exchange wins: nothing in the ledger is "fixed"; flatten sizes from exchange balances)
-   - no fresh quote for > max_data_age_s                     -> kill switch (freeze entries)
+   - feed staleness is evaluated ONLY for symbols with a non-dust position or a live order; with
+     nothing held or ordered the guardian never acts on feed age (a universe-only symbol's stale or
+     missing quote is the bot's concern: it refuses entries on it). For those symbols:
+     no fresh quote for > max_data_age_s                     -> condition stale_feed:<symbols>, no
+       kill switch (entries on a stale quote are already refused by the bot and the risk engine)
+     no fresh quote for > stale_action_after_s (120 s), held -> per config: hold, or flatten
      (a quote dated > max_quote_future_skew_s after the clock is invalid, never fresh; freshness
      is clamped to now, so a bogus future timestamp or a backward clock step cannot mask a
      frozen feed)
-   - no fresh quote for > stale_action_after_s (120 s)       -> per config: hold, or flatten
-   - strategy heartbeat older than heartbeat_timeout_s       -> kill switch
+   - strategy heartbeat older than heartbeat_timeout_s       -> kill switch, TRANSIENT ('auto:')
    - breach evaluation error                                 -> kill switch (fail closed)
-   The guardian only ever ENGAGES the kill switch; clearing it is an operator action.
+   Kill switch release. Every engagement stays until an operator disengages it, EXCEPT the
+   guardian's own transient one (reason 'auto:...', actor 'guardian', still the latest row): the
+   guardian releases that after auto_release_clear_ticks (3) consecutive clear ticks spanning at
+   least auto_release_clear_s (60 s), as an audited 'release_kill_switch' event. A latching
+   condition seen while only a transient engagement holds the switch writes a new, latching row
+   on top (KillSwitch.engage_unless_held), so it can never be auto-released.
 5. Every decision is appended to audit_events with actor='guardian' (and kill-switch rows carry
    actor='guardian').
 """
@@ -42,12 +51,19 @@ from typing import Any, Callable, Iterable, Sequence
 
 from wallexbot.dust import is_dust, min_notional_for
 from wallexbot.guardian.flatten import ACTOR, FlattenConfig, FlattenResult, flatten_all
+from wallexbot.oms import OPEN_INTENT_STATES
 from wallexbot.risk.engine import AccountState, utc_day
+from wallexbot.risk.killswitch import AUTO_PREFIX
 from wallexbot.types import IntentState, Side
 
 _ZERO = Decimal(0)
 _HUNDRED = Decimal(100)
 _IN_FLIGHT = frozenset({IntentState.PROPOSED, IntentState.RISK_APPROVED})
+# Kill-switch conditions. LATCHING ones stay engaged until an operator disengages the switch;
+# TRANSIENT ones are engaged with an 'auto:' reason that the guardian itself releases once clear.
+LATCHING_CONDITIONS = frozenset({"balance_mismatch", "breach_eval_error", "daily_loss_soft", "drawdown_soft",
+                                 "daily_loss_hard", "drawdown_hard"})
+TRANSIENT_CONDITIONS = frozenset({"heartbeat_lost"})
 log = logging.getLogger("wallexbot.guardian")
 
 
@@ -69,6 +85,10 @@ class GuardianConfig:
     mismatch_rel_pct: Decimal = Decimal("0.1")
     mismatch_confirm_ticks: int = 2             # transient races (fill seen before ack) self-clear
     in_flight_grace_s: float = 30.0             # a mid-submit intent younger than this skips the check
+    # Auto-release of the guardian's own TRANSIENT ('auto:') kill-switch engagement: the condition
+    # must be clear for this many consecutive ticks AND at least this many seconds.
+    auto_release_clear_ticks: int = 3
+    auto_release_clear_s: float = 60.0
     flatten: FlattenConfig = field(default_factory=FlattenConfig)
 
     def __post_init__(self) -> None:
@@ -76,6 +96,8 @@ class GuardianConfig:
             raise ValueError(f"stale_action must be 'hold' or 'flatten', not {self.stale_action!r}")
         if not self.max_quote_future_skew_s >= 0:
             raise ValueError("max_quote_future_skew_s must be >= 0")
+        if self.auto_release_clear_ticks < 1 or not self.auto_release_clear_s >= 60:
+            raise ValueError("auto_release_clear_ticks must be >= 1 and auto_release_clear_s >= 60")
 
 
 @dataclass
@@ -109,6 +131,8 @@ class Guardian:
         self._mismatch_streak: dict[str, int] = {}
         self._reviewed: frozenset[str] = frozenset()
         self._last_logged: tuple | None = None
+        self._clear_ticks = 0
+        self._clear_since: float | None = None
 
     # ------------------------------------------------------------------ public
     def tick(self) -> TickReport:
@@ -124,21 +148,27 @@ class Guardian:
             open_orders = []
         positions = self.oms.positions()
         rules = self.risk.rules
-        syms = self._watch_symbols(balances, positions, now)
+        ordered = {o.symbol for o in open_orders if o.symbol in rules} | \
+            {r.intent.symbol for r in self.store.intents_in_states(OPEN_INTENT_STATES) if r.intent.symbol in rules}
+        syms = sorted(set(self._watch_symbols(balances, positions, now)) | ordered)
         quotes, future_dated = self._quotes(now, syms, quiet=self._universe_only(syms, balances, positions))
         if future_dated:
             rep.conditions.append("future_quote_ts:" + ",".join(future_dated))
 
+        # Feed staleness only matters where we are exposed: a non-dust position or a live order.
+        # Universe-only symbols are the bot's concern (it refuses entries on a stale/missing quote).
         held = sorted(s for s in syms if not self._dust(s, rules[s], balances, positions, quotes))
-        watch = held or syms
-        feed_age = max((now - self._last_fresh.get(s, self.started_at) for s in watch), default=0.0)
-        if feed_age > self.max_age:
-            rep.conditions.append("stale_feed")
+        ages = {s: now - self._last_fresh.get(s, self.started_at) for s in sorted(set(held) | ordered)}
+        feed_age = max(ages.values(), default=None)
+        held_age = max((ages[s] for s in held), default=None)
+        stale = [s for s, a in ages.items() if a > self.max_age]
+        if stale:
+            rep.conditions.append("stale_feed:" + ",".join(stale))
 
         equity, unmarked = self._equity(balances, quotes, positions)
         rep.equity = equity
         day = utc_day(now)
-        if "stale_feed" not in rep.conditions and not unmarked:
+        if not stale and not unmarked:
             self.store.append_equity_sod(day, equity, ts=now)
             hwm = self.store.equity_hwm()
             if hwm is None or equity > hwm:
@@ -175,28 +205,33 @@ class Guardian:
         if now - (hb if hb is not None else self.started_at) > self.cfg.heartbeat_timeout_s:
             rep.conditions.append("heartbeat_lost")
 
-        freeze = [c for c in rep.conditions
-                  if c.split(":")[0] in ("stale_feed", "heartbeat_lost", "balance_mismatch", "breach_eval_error",
-                                         "daily_loss_soft", "drawdown_soft", "daily_loss_hard", "drawdown_hard")]
-        if freeze and not self.ks.is_engaged():
-            self.ks.engage("guardian: " + ",".join(freeze), actor=ACTOR, ts=now)
+        latching = [c for c in rep.conditions if c.split(":")[0] in LATCHING_CONDITIONS]
+        transient = [c for c in rep.conditions if c.split(":")[0] in TRANSIENT_CONDITIONS]
+        if latching:
+            if self.ks.engage_unless_held("guardian: " + ",".join(latching + transient), actor=ACTOR, ts=now):
+                rep.actions.append("engage_kill_switch")
+                self._audit("engage_kill_switch", {"reasons": latching + transient, "auto_release": False}, now)
+        elif transient and not self.ks.is_engaged():
+            self.ks.engage(AUTO_PREFIX + ",".join(transient), actor=ACTOR, ts=now)
             rep.actions.append("engage_kill_switch")
-            self._audit("engage_kill_switch", {"reasons": freeze}, now)
+            self._audit("engage_kill_switch", {"reasons": transient, "auto_release": True}, now)
+        self._auto_release(now, rep, bool(latching or transient))
 
         exposure = bool(held) or any(o.side is Side.BUY for o in open_orders)
         if hard and exposure:
             rep.flatten = self._flatten("hard", True, ",".join(hard), account)
             rep.actions.append("flatten:hard")
-        elif feed_age > self.cfg.stale_action_after_s and held:
+        elif held_age is not None and held_age > self.cfg.stale_action_after_s:
             if self.cfg.stale_action == "flatten":
-                rep.flatten = self._flatten("stale", False, f"feed_age={int(feed_age)}s", account)
+                rep.flatten = self._flatten("stale", False, f"feed_age={int(held_age)}s", account)
                 rep.actions.append("flatten:stale")
             else:
                 rep.conditions.append("stale_hold")
 
         key = (tuple(rep.conditions), tuple(rep.actions))
         if rep.actions or key != self._last_logged:
-            self._audit("tick", {"equity": equity, "sod": sod, "hwm": hwm, "feed_age_s": round(feed_age, 3),
+            self._audit("tick", {"equity": equity, "sod": sod, "hwm": hwm,
+                                 "feed_age_s": None if feed_age is None else round(feed_age, 3),
                                  "conditions": rep.conditions, "actions": rep.actions,
                                  "flat": None if rep.flatten is None else rep.flatten.flat,
                                  "needs_review": None if rep.flatten is None else rep.flatten.needs_review}, now)
@@ -204,6 +239,30 @@ class Guardian:
         return rep
 
     # ------------------------------------------------------------------ pieces
+    def _auto_release(self, now: float, rep: TickReport, condition_present: bool) -> None:
+        """Release the kill switch ONLY when its latest row is the guardian's own transient
+        ('auto:') engagement and no freezing condition has been seen for auto_release_clear_ticks
+        consecutive ticks spanning at least auto_release_clear_s. Anything else (operator, bot,
+        latching guardian reasons, a row written after ours) is never touched. Audited."""
+        if condition_present or not self.ks.held_by_transient():
+            self._clear_ticks, self._clear_since = 0, None
+            return
+        if self._clear_since is None or not self._clear_since <= now:   # first clear tick / clock stepped back
+            self._clear_ticks, self._clear_since = 0, now
+        self._clear_ticks += 1
+        clear_s = now - self._clear_since
+        if self._clear_ticks < self.cfg.auto_release_clear_ticks or clear_s < self.cfg.auto_release_clear_s:
+            return
+        released = self.store.latest_killswitch().reason
+        self.ks.disengage(f"guardian auto-release: '{released}' clear for {self._clear_ticks} ticks / "
+                          f"{int(clear_s)}s", actor=ACTOR, ts=now)
+        rep.actions.append("release_kill_switch")
+        self._audit("release_kill_switch", {"released": released, "clear_ticks": self._clear_ticks,
+                                            "clear_s": round(clear_s, 3)}, now)
+        log.warning("guardian: kill switch auto-released (%s clear for %d ticks / %ds)", released,
+                    self._clear_ticks, int(clear_s))
+        self._clear_ticks, self._clear_since = 0, None
+
     def _flatten(self, cause: str, hard: bool, reason: str, account: AccountState | None) -> FlattenResult:
         return flatten_all(self.store, self.broker, self.oms, self.ks, cause=cause, hard=hard,
                            config=self.cfg.flatten, clock=self.clock, sleep=self.sleep, account=account,
