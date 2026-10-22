@@ -512,6 +512,25 @@ def test_status_mapping_table_and_conservative_unknowns(raw_status, fills, expec
                                   "EXPIRED", "REJECTED"}
 
 
+@pytest.mark.parametrize("raw_status", ["FINISHED", "finished"])
+def test_prose_only_finished_status_is_filled_only_when_the_fills_are_complete(raw_status, caplog):
+    """The cancel page names FINISHED as 'fully executed' (prose only, no enum): it finalises an
+    order only when the fills cover origQty; otherwise it is an unknown status (open, logged), so
+    partial fills are still booked and nothing that might trade again is finalised."""
+    caplog.set_level(logging.WARNING, logger="wallexbot")
+    full = order_json(status=raw_status, fills=[("60010", "0.006", "0.000021", "BTC"),
+                                                ("60005", "0.004", "0.000014", "BTC")])
+    assert parse_order(full, now=0.0).status is OrderStatus.FILLED
+    assert "unknown order status" not in caplog.text
+    part = parse_order(order_json(status=raw_status, fills=[("60010", "0.004", "0.000014", "BTC")]),
+                       now=0.0)
+    assert (part.status, part.filled_qty) == (OrderStatus.PARTIALLY_FILLED, D("0.004"))
+    assert parse_order(order_json(status=raw_status), now=0.0).status is OrderStatus.NEW
+    assert caplog.text.count("unknown order status") == 2
+    with pytest.raises(BrokerDataError, match="executedQty"):     # cross-check still runs first
+        parse_order({**full, "executedQty": w16("0.004")}, now=0.0)
+
+
 BALANCE_MUTATIONS = [
     lambda r: r["balances"]["USDT"].pop("value"), lambda r: r["balances"]["USDT"].pop("locked"),
     lambda r: r["balances"]["USDT"].__setitem__("locked", "2000"),

@@ -87,9 +87,10 @@ MAX_BODY_BYTES = 4 * 1024 * 1024
 MAX_FILLS = 1000
 USER_AGENT = "wallexbot/0.1"
 
-# UNVERIFIED: Wallex's order-status enum is not publicly documented. Values not listed here map to
-# a conservative OPEN state (NEW, or PARTIALLY_FILLED once fills exist) and are logged, so the OMS
-# keeps reconciling instead of finalising an order that may still trade.
+# UNVERIFIED: Wallex publishes no order-status enum; its docs show only NEW, FILLED and CANCELED as
+# examples. Values not listed here map to a conservative OPEN state (NEW, or PARTIALLY_FILLED once
+# fills exist) and are logged, so the OMS keeps reconciling instead of finalising an order that
+# may still trade.
 STATUS_MAP: Mapping[str, OrderStatus] = {
     "NEW": OrderStatus.NEW,
     "PARTIALLY_FILLED": OrderStatus.PARTIALLY_FILLED,
@@ -99,6 +100,11 @@ STATUS_MAP: Mapping[str, OrderStatus] = {
     "EXPIRED": OrderStatus.CANCELED,       # terminal; any fills are kept
     "REJECTED": OrderStatus.REJECTED,
 }
+# Named only in prose on the cancel page ("an order can be cancelled until it is FINISHED, i.e.
+# while it is not fully executed"). Read as FILLED only when the fills add up to origQty; any
+# other FINISHED order takes the unknown-status path above (open, logged), so its fills are still
+# booked and nothing that could trade again is finalised.
+_FILLED_WHEN_COMPLETE = frozenset({"FINISHED"})
 _SIDES = {"BUY": Side.BUY, "SELL": Side.SELL}
 _TYPES = {t.value: t for t in OrderType}
 _PRICED = frozenset({OrderType.LIMIT, OrderType.STOP_LIMIT})
@@ -403,8 +409,11 @@ def _epoch(value: object) -> float | None:
     return ts if 10 ** 9 <= ts <= 10 ** 11 else None
 
 
-def _map_status(raw: str, filled_qty: Decimal, what: str) -> OrderStatus:
-    mapped = STATUS_MAP.get(raw.upper())
+def _map_status(raw: str, filled_qty: Decimal, quantity: Decimal, what: str) -> OrderStatus:
+    key = raw.upper()
+    mapped = STATUS_MAP.get(key)
+    if mapped is None and key in _FILLED_WHEN_COMPLETE and filled_qty == quantity:
+        mapped = OrderStatus.FILLED           # fully executed: nothing left that could trade
     if mapped is None:
         mapped = OrderStatus.PARTIALLY_FILLED if filled_qty > 0 else OrderStatus.NEW
         log.warning("%s", _m(f"{what}: unknown order status {_clip(repr(raw), 40)}; treated as "
@@ -459,7 +468,7 @@ def parse_order(obj: object, *, now: float, expect_client_id: str | None = None)
     if obj.get("executedQty") is not None \
             and _dec(obj["executedQty"], f"{what} executedQty") != filled_qty:
         raise BrokerDataError(f"{what}: executedQty differs from the sum of fills (fills incomplete)")
-    status = _map_status(raw_status, filled_qty, what)
+    status = _map_status(raw_status, filled_qty, quantity, what)
     if status is OrderStatus.FILLED and filled_qty != quantity:
         raise BrokerDataError(f"{what}: FILLED but the fills do not add up to origQty (incomplete)")
     created = _epoch(obj.get("transactTime"))
