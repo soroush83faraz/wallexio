@@ -14,10 +14,10 @@ PROFILE  ?= strict
 # e.g. HEALTH_ARGS=--allow-killswitch: report an engaged kill switch as a warning instead of failing
 HEALTH_ARGS ?=
 
-.PHONY: help venv test demo backtest shadow guardian docker-build docker-up docker-down healthcheck clean
+.PHONY: help venv test demo backtest shadow guardian smoke docker-build docker-up docker-up-snap docker-down healthcheck clean
 
 help:
-	@echo "targets: venv test demo backtest shadow guardian docker-build docker-up docker-down healthcheck clean"
+	@echo "targets: venv test demo backtest shadow guardian smoke docker-build docker-up docker-up-snap docker-down healthcheck clean"
 
 $(PY):
 	$(PYTHON) -m venv $(VENV)
@@ -51,11 +51,22 @@ guardian: $(PY)
 	@mkdir -p $(RUN_DIR)
 	$(PY) -m wallexbot guardian --db $(RUN_DIR)/demo_guardian.db --mode mock --demo-db --ticks 3 --interval 1
 
+# Pre-deploy smoke test (docs/DEPLOY.md): ONE forced test signal through the real shadow stack on the live
+# public order book (public GETs only), entry -> exit -> P&L, invariants checked. Throwaway DB in a fresh
+# temp dir; SMOKE_ARGS e.g. "--hold-s 30". Takes a few minutes. NOT a strategy result.
+SMOKE_ARGS ?=
+smoke: $(PY)
+	@d=$$(mktemp -d "$${TMPDIR:-/tmp}/wallex-smoke.XXXXXX") && echo "scratch dir: $$d" && $(PY) deploy/smoke_shadow_fill.py "$$d" $(SMOKE_ARGS)
+
 docker-build:
 	docker build $(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE)) -t $(IMAGE) .
 
 docker-up:
 	docker compose up -d --build
+
+# Hosts where no-new-privileges breaks every container (snap Docker): same stack, security_opt reset (docs/DEPLOY.md).
+docker-up-snap:
+	docker compose -f docker-compose.yml -f docker-compose.snap.yml up -d --build
 
 docker-down:
 	docker compose down
