@@ -135,6 +135,8 @@ def fill_json(price, qty, fee, asset, symbol=SYM):
 
 def order_json(cid=CID, *, symbol=SYM, side="BUY", type_="LIMIT", qty="0.01", price="60010",
                status="NEW", fills=(), **extra):
+    """Its stop price is under ``stopPrice`` (the RESPONSE spelling; the create request uses
+    ``stop_Price``)."""
     fills = [fill_json(*f) if isinstance(f, tuple) else f for f in fills]
     executed = sum((D(f["quantity"]) for f in fills), D(0))
     executed_sum = sum((D(f["price"]) * D(f["quantity"]) for f in fills), D(0))
@@ -143,6 +145,7 @@ def order_json(cid=CID, *, symbol=SYM, side="BUY", type_="LIMIT", qty="0.01", pr
          "origQty": w16(qty), "executedSum": w16(executed_sum), "executedQty": w16(executed),
          "executedPrice": w16(executed_sum / executed if executed else 0),
          "sum": w16(D(qty) * D(price or 0)), "executedPercent": int(executed / D(qty) * 100),
+         "stopPrice": None, "stopPriceCondition": None,
          "status": status, "active": status in ("NEW", "PARTIALLY_FILLED"), "fills": fills}
     o.update(extra)
     return o
@@ -206,13 +209,27 @@ def test_stop_orders_are_refused_unless_enabled_then_use_the_stop_field(armed):
     with pytest.raises(OrderRejected, match="stop orders are disabled"):
         place(broker(t, armed), type=OrderType.STOP_LIMIT, price=D("59000"), stop_price=D("59100"))
     assert t.calls == []
-    t = Scripted(ok(order_json(type_="STOP_LIMIT", price="59000", stop_Price=w16("59100")), 201))
+    t = Scripted(ok(order_json(type_="STOP_LIMIT", price="59000", stopPrice=w16("59100")), 201))
     order = place(broker(t, armed, allow_stop_orders=True), type=OrderType.STOP_LIMIT,
                   price=D("59000"), stop_price=D("59100"))
     body = json.loads(t.calls[0].body)
-    assert WP.STOP_PRICE_FIELD == "stop_Price"          # spelling UNVERIFIED (see module docstring)
+    assert WP.STOP_PRICE_FIELD == "stop_Price"              # documented request spelling
+    assert WP.STOP_PRICE_RESPONSE_FIELD == "stopPrice"      # documented response spelling
     assert body["stop_Price"] == "59100" and body["type"] == "STOP_LIMIT" and body["price"] == "59000"
+    assert "stopPrice" not in body
     assert order.stop_price == D("59100")
+
+
+def test_response_stop_price_is_read_only_from_the_documented_stopPrice_field():
+    stop = order_json(type_="STOP_MARKET", price=None, stopPrice=w16("59100"))
+    assert parse_order(stop, now=0.0).stop_price == D("59100")
+    request_spelling = order_json(type_="STOP_MARKET", price=None, stop_Price=w16("59100"))
+    assert parse_order(request_spelling, now=0.0).stop_price is None
+    for value in ("0", "-1", "x", 59100.5):                 # a stop order needs a positive stop
+        with pytest.raises(BrokerDataError):
+            parse_order(order_json(type_="STOP_LIMIT", price="59000", stopPrice=value), now=0.0)
+    limit = order_json(stopPrice="0", stopPriceCondition="")    # ignored on a non-stop order
+    assert parse_order(limit, now=0.0).stop_price is None
 
 
 def test_non_stop_order_never_sends_a_stop_field(armed):

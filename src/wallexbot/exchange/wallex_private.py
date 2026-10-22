@@ -79,7 +79,8 @@ OPEN_ORDERS_PATH = "/v1/account/openOrders"
 BALANCES_PATH = "/v1/account/balances"
 FEE_PATH = "/v1/account/fee"
 ENDPOINT_PATHS = frozenset({ORDERS_PATH, OPEN_ORDERS_PATH, BALANCES_PATH, FEE_PATH})
-STOP_PRICE_FIELD = "stop_Price"             # UNVERIFIED spelling (task spec; not in the docs)
+STOP_PRICE_FIELD = "stop_Price"             # documented REQUEST field (create body)
+STOP_PRICE_RESPONSE_FIELD = "stopPrice"     # documented RESPONSE field (order object)
 PAGE_PARAM, PER_PAGE_PARAM = "page", "per_page"   # UNVERIFIED openOrders paging parameters
 PER_PAGE, MAX_PAGES = 100, 20
 MAX_BODY_BYTES = 4 * 1024 * 1024
@@ -423,7 +424,7 @@ def parse_order(obj: object, *, now: float, expect_client_id: str | None = None)
     quantity = _dec(_req(obj, "origQty", what), f"{what} origQty", positive=True)
     price = _dec(_req(obj, "price", what), f"{what} price", positive=True) if otype in _PRICED \
         else None
-    stop_raw = obj.get(STOP_PRICE_FIELD) if otype in _STOPS else None
+    stop_raw = obj.get(STOP_PRICE_RESPONSE_FIELD) if otype in _STOPS else None
     stop = None if stop_raw is None else _dec(stop_raw, f"{what} stop price", positive=True)
     raw_status = _req(obj, "status", what)
     if type(raw_status) is not str:
