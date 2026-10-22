@@ -21,6 +21,18 @@ lot is never finer than known listings; min_notional stays None (the larger of t
 
 Signal evaluations are memoised per (symbol, bar, visible length[, market]) so the four exit policies and
 re-runs share them; the engines are stateless and only read the trailing bars, so results are identical.
+
+Bar size (`bar_minutes` 15 | 60). The split is ALWAYS defined on the 15m timeline above, so train,
+validation and the reserved test period are the same wall-clock intervals for both bar sizes. A 60m run
+uses closed 1h bars (aggregated from 1m) lying entirely inside the segment ([start, end of its last 15m
+bar)), warm-up bars entirely inside the 300 x 15m embargo before it (75 1h bars; S0/S1 abstain until they
+have their own minimum history), and entries from the segment's first bar. Strategy/exit lookbacks are
+the configured BAR COUNTS (so 20 bars = 20 hours on 1h) and the runner cooldown is 8 / 2 bars of that
+size. With ~45 days of data 1h gives ~460 train and ~230 validation bars: few trades, low power.
+
+Cost source (`cost_source` 'recorded' | 'proxy'). 'recorded' uses `CostModel.from_calibration` (p90
+half spread and impact curve from recorded order books, `backtest/calibrate.py`) for every symbol with a
+usable calibration and the proxy model for the rest; each symbol's source is labelled in the report.
 """
 from __future__ import annotations
 
@@ -39,7 +51,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from wallexbot.backtest.costs import CostModel
+from wallexbot.backtest.calibrate import CostCalibration
+from wallexbot.backtest.costs import COST_MODEL_VERSION, CostBook, CostModel
 from wallexbot.backtest.engine import (BacktestParams, BacktestResult, Trade, loss_streak_cooldown,
                                        run_backtest, to_canonical)
 from wallexbot.backtest.metrics import buy_and_hold, compute_metrics, equal_weight_buy_and_hold
@@ -77,6 +90,11 @@ SENSITIVITY_PARAMS = ("donchian_period", "ema_period", "roc_z_min", "volume_mult
                       "late_atr_mult", "expected_move_atr", "cost_mult", "min_score", "stop_atr_mult")
 FIXTURE_MARKETS = Path(__file__).resolve().parents[3] / "tests" / "fixtures" / "markets.json"
 LEDGER_DEFAULT = Path(__file__).resolve().parents[3] / "reports" / "test_set_ledger.jsonl"
+CALIBRATION_DEFAULT = Path(__file__).resolve().parents[3] / "reports" / "cost_calibration.json"
+BAR_MINUTES = (15, 60)
+TIMEFRAME_OF = {15: "15m", 60: "1h"}
+COST_QUANTILE = "p90"
+MIN_MEANINGFUL_TRADES = 30
 SPLIT_NOTE = (f"50% train / 25% validation / remainder (~25%) test, by 15m bar time; embargo {EMBARGO_BARS} bars "
               f"between segments; {WARMUP_BARS}-bar warm-up from the embargo.")
 EXPLORATORY = ("EXPLORATORY, UNVALIDATED results: in-sample (train) and validation only, placeholder/assumed "
@@ -102,21 +120,59 @@ def _month_span(sym_dir: Path, symbol: str) -> tuple[int, int]:
 def load_bars_15m(history_dir: Path | str, symbols: Sequence[str]) -> tuple[dict[str, list[Candle]], dict]:
     """Closed 15m bars per symbol (aggregated from 1m; bars with absent minutes carry `missing` > 0) and a
     per-symbol data-quality summary. Raises if a symbol has no data."""
+    by_tf, quality = load_bars_tf(history_dir, symbols, ("15m",))
+    return by_tf["15m"], quality
+
+
+def load_bars_tf(history_dir: Path | str, symbols: Sequence[str], timeframes: Sequence[str] = ("15m",)
+                 ) -> tuple[dict[str, dict[str, list[Candle]]], dict]:
+    """{timeframe: {symbol: closed bars}} aggregated from the same 1m history, plus the data-quality summary
+    (15m keys as before; other timeframes add `bars_<tf>` / `bars_with_missing_minutes_<tf>`)."""
     hd = Path(history_dir)
-    bars, quality = {}, {}
+    out: dict[str, dict[str, list[Candle]]] = {tf: {} for tf in timeframes}
+    quality: dict[str, dict] = {}
     for s in symbols:
         a, b = _month_span(hd / s, s)
         one = load_history(hd, s, a, b)
-        agg = aggregate_to(one, "15m")
-        if not agg:
-            raise ValueError(f"{s}: no closed 15m bars")
-        bars[s] = agg
-        flagged = [c for c in agg if c.missing > 0]
-        quality[s] = {"rows_1m": len(one), "bars_15m": len(agg), "first_ts": agg[0].ts, "last_ts": agg[-1].ts,
-                      "bars_with_missing_minutes": len(flagged),
-                      "missing_minutes_in_bars": sum(c.missing for c in flagged),
-                      "zero_volume_bars": sum(1 for c in agg if c.volume == 0)}
-    return bars, quality
+        q: dict[str, Any] = {"rows_1m": len(one)}
+        for tf in timeframes:
+            agg = aggregate_to(one, tf)
+            if not agg:
+                raise ValueError(f"{s}: no closed {tf} bars")
+            out[tf][s] = agg
+            flagged = [c for c in agg if c.missing > 0]
+            sfx = "" if tf == "15m" else f"_{tf}"
+            q.update({f"bars_{tf}": len(agg), f"bars_with_missing_minutes{sfx}": len(flagged),
+                      f"missing_minutes_in_bars{sfx}": sum(c.missing for c in flagged),
+                      f"zero_volume_bars{sfx}": sum(1 for c in agg if c.volume == 0)})
+            if tf == "15m" or "first_ts" not in q:
+                q.update(first_ts=agg[0].ts, last_ts=agg[-1].ts)
+        quality[s] = q
+    return out, quality
+
+
+def segment_bars(split: Split, name: str, bars: Mapping[str, Sequence[Candle]], bar_s: int,
+                 warmup_bars_15m: int = WARMUP_BARS) -> tuple[dict[str, list[Candle]], int]:
+    """Bars of `bar_s` seconds for one 15m-defined segment: every bar lying entirely inside
+    [first warm-up 15m bar, end of the segment's last 15m bar), and the trade_start_ts. The warm-up is the
+    last `warmup_bars_15m` 15m bars of the embargo (never the previous segment). For bar_s == 900 this is
+    exactly `split.bars_for(name, bars, warmup_bars_15m)`."""
+    if warmup_bars_15m > split.embargo_bars:
+        raise ValueError("warm-up longer than the embargo would leak the previous segment")
+    if name == "test":
+        raise ValueError("segment_bars never builds the test segment (see run_final_test)")
+    seg = split.segment(name)
+    lo = split.timestamps[max(0, seg.start - warmup_bars_15m)]
+    hi = seg.end_ts + BAR_S
+    return ({s: [c for c in cs if c.ts >= lo and c.ts + bar_s <= hi] for s, cs in sorted(bars.items())},
+            seg.start_ts)
+
+
+def scored_bars(split: Split, name: str, bars: Mapping[str, Sequence[Candle]], bar_s: int) -> dict[str, list[Candle]]:
+    """Bars of `bar_s` seconds lying entirely inside one segment (no warm-up), e.g. for buy-and-hold."""
+    seg = split.segment(name)
+    return {s: [c for c in cs if c.ts >= seg.start_ts and c.ts + bar_s <= seg.end_ts + BAR_S]
+            for s, cs in sorted(bars.items())}
 
 
 def symbol_rules(symbols: Sequence[str], bars: Mapping[str, Sequence[Candle]],
@@ -318,25 +374,80 @@ class RunSpec:
     split: str
 
 
+def build_costs(symbols: Sequence[str], cost_source: str, calibration: CostCalibration | None,
+                quantile: str = COST_QUANTILE) -> tuple[CostBook, dict[str, str]]:
+    """The cost book at the primary fee (callers apply each fee scenario with `with_fee`) and a label per
+    symbol: 'recorded (p90)', 'proxy (no usable calibration)' or 'proxy (requested)'."""
+    if cost_source not in ("recorded", "proxy"):
+        raise ValueError("cost_source must be 'recorded' or 'proxy'")
+    if cost_source == "recorded" and calibration is None:
+        raise ValueError("cost_source 'recorded' needs a calibration (run `python -m wallexbot calibrate-costs`)")
+    fee0 = FEE_SCENARIOS[0][1]
+    default = CostModel(taker_rate=fee0, maker_rate=fee0)
+    models, labels = {}, {}
+    for s in sorted(symbols):
+        if cost_source == "proxy":
+            labels[s] = "proxy (requested)"
+            continue
+        try:
+            models[s] = CostModel.from_calibration(calibration, s, quantile, taker_rate=fee0)
+            labels[s] = f"recorded ({quantile})"
+        except KeyError:
+            labels[s] = "proxy (no usable calibration)"
+    return CostBook.of(default, models), labels
+
+
+def cost_model_summary(book: CostBook, labels: Mapping[str, str]) -> dict:
+    """Per symbol: source label, half spread, impact curve/cap, and the round-trip cost the S1 gate sees
+    at each fee scenario."""
+    out = {}
+    for s in sorted(labels):
+        m = book.for_symbol(s)
+        out[s] = {"source": labels[s], "half_spread_bps": str(m.half_spread_bps),
+                  "impact_cap_bps": str(m.impact_cap_bps),
+                  "impact_curve": [[str(n), str(b)] for n, b in m.impact_curve] or None,
+                  "impact_at_1000_bps": (str(m.impact_fraction(Decimal(1000), None) * 10000)
+                                         if m.cost_source == "recorded" else None),
+                  "impact_status_at_1000": m.impact_status(Decimal(1000)),
+                  "round_trip_cost_bps": {lab: str(m.with_fee(fee).market_context().round_trip_cost_bps)
+                                          for lab, fee, _ in FEE_SCENARIOS}}
+    return out
+
+
 def run_one(bars_seg: Mapping[str, Sequence[Candle]], start_ts: int, rules: Mapping[str, SymbolRules],
             risk: RiskConfig, strategy: str, exit_name: str, fee: Decimal, memo: dict, *,
-            momentum: MomentumParams | None = None, exit_params: ExitParams | None = None
+            momentum: MomentumParams | None = None, exit_params: ExitParams | None = None,
+            costs: CostBook | CostModel | None = None, bar_s: int = BAR_S
             ) -> tuple[BacktestResult, BacktestResult, CachedEngine]:
-    """(raw engine result, warm-up-trimmed view, the counting engine wrapper)."""
+    """(raw engine result, warm-up-trimmed view, the counting engine wrapper). `costs` (any fee; the
+    scenario's fee is applied here) defaults to the proxy CostModel."""
     engine = CachedEngine(make_signal_engine(strategy, momentum), memo, use_market=(strategy == "S1"),
                           count_from_ts=start_ts)
-    cost = CostModel(taker_rate=fee, maker_rate=fee)
-    params = BacktestParams(bar_interval_s=BAR_S, trade_start_ts=start_ts, lookback_bars=LOOKBACK_BARS)
+    cost = CostModel(taker_rate=fee, maker_rate=fee) if costs is None else costs.with_fee(fee)
+    params = BacktestParams(bar_interval_s=bar_s, trade_start_ts=start_ts, lookback_bars=LOOKBACK_BARS)
     raw = run_backtest(bars_seg, engine, make_exit(exit_name, fee, rules, exit_params), cost, risk, rules,
-                       INITIAL_EQUITY, params, cooldown=RunnerCooldown())
+                       INITIAL_EQUITY, params, cooldown=RunnerCooldown(bar_s=bar_s))
     return raw, trim_warmup(raw, start_ts), engine
 
 
-def summarize(raw: BacktestResult, view: BacktestResult, engine: CachedEngine) -> dict:
+def fill_impact_status(result: BacktestResult, costs: CostBook | CostModel | None) -> dict[str, int]:
+    """How each fill's impact was priced: proxy / below_range / interpolated / extrapolated / capped."""
+    out: dict[str, int] = {}
+    for f in result.fills:
+        st = "proxy" if costs is None else costs.for_symbol(f.symbol).impact_status(f.qty * f.ref_price)
+        out[st] = out.get(st, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def summarize(raw: BacktestResult, view: BacktestResult, engine: CachedEngine,
+              costs: CostBook | CostModel | None = None) -> dict:
     m = compute_metrics(view)
     row = {k: m[k] for k in METRIC_KEYS}
     row.update({"evaluations": engine.evaluations, "signals": engine.signals,
                 "abstentions": engine.evaluations - engine.signals,
+                "low_n": m["trade_count"] < MIN_MEANINGFUL_TRADES,
+                "fill_impact_status": fill_impact_status(raw, costs),
+                "max_fill_notional": float(max((f.notional for f in raw.fills), default=Decimal(0))),
                 "events": _event_counts(raw), "inputs_hash": raw.inputs_hash, "result_hash": raw.result_hash})
     return row
 
@@ -357,12 +468,15 @@ def required_atr_pct(p: MomentumParams, market: MarketContext, *, favourable: bo
 
 
 def feasibility_for_symbol(symbol: str, bars: Sequence[Candle], ranges: Sequence[tuple[int, int]],
-                           fees: Sequence[tuple[str, Decimal, str]], params: MomentumParams | None = None) -> dict:
+                           fees: Sequence[tuple[str, Decimal, str]], params: MomentumParams | None = None,
+                           cost_model: CostModel | None = None) -> dict:
     """For each bar of `symbol` inside one of the (start_ts, end_ts) `ranges`: would the S1 cost gate pass at
-    each fee scenario? Features come from `compute_features` on the exact prefix (as the engine sees it)."""
+    each fee scenario? Features come from `compute_features` on the exact prefix (as the engine sees it).
+    `cost_model` (the symbol's, any fee) defaults to the proxy model."""
     p = params or MomentumParams()
     engine = MomentumSignalEngine(p)
-    markets = {label: CostModel(taker_rate=fee, maker_rate=fee).market_context() for label, fee, _ in fees}
+    base = cost_model if cost_model is not None else CostModel()
+    markets = {label: base.with_fee(fee).market_context() for label, fee, _ in fees}
     primary = fees[0][0]
     n = 0
     in_ranges = 0
@@ -392,7 +506,13 @@ def feasibility_for_symbol(symbol: str, bars: Sequence[Candle], ranges: Sequence
             "atr_band_ok": band_ok, "all_other_rules_pass_ignoring_cost_gate": rest_ok_primary,
             "atr_pct_median": statistics.median(atr_pcts) if atr_pcts else None,
             "atr_pct_p90": sorted(atr_pcts)[int(0.9 * (len(atr_pcts) - 1))] if atr_pcts else None,
-            "atr_pct_max": max(atr_pcts) if atr_pcts else None}
+            "atr_pct_max": max(atr_pcts) if atr_pcts else None,
+            "cost_source": base.cost_source,
+            "round_trip_cost_bps": {label: float(mk.round_trip_cost_bps) for label, mk in markets.items()},
+            "atr_pct_needed_favourable": {label: required_atr_pct(p, mk, favourable=True)
+                                          for label, mk in markets.items()},
+            "atr_pct_needed_tightened": {label: required_atr_pct(p, mk, favourable=False)
+                                         for label, mk in markets.items()}}
 
 
 # ------------------------------------------------------------------------------------------ grid
@@ -411,13 +531,16 @@ def _grid_task(task: tuple[str, str, str, str]) -> list[tuple[RunSpec, dict]]:
     memo: dict = {}
     rows = []
     for ex in EXITS:
-        raw, view, eng = run_one(bars_seg, start_ts, _CTX["rules"], _CTX["risk"], strategy, ex, fee, memo)
-        rows.append((RunSpec(strategy, ex, fee_label, fee, split_name), summarize(raw, view, eng)))
+        raw, view, eng = run_one(bars_seg, start_ts, _CTX["rules"], _CTX["risk"], strategy, ex, fee, memo,
+                                 costs=_CTX["costs"], bar_s=_CTX["bar_s"])
+        rows.append((RunSpec(strategy, ex, fee_label, fee, split_name),
+                     summarize(raw, view, eng, _CTX["costs"].with_fee(fee))))
     return rows
 
 
 def _feas_task(symbol: str) -> tuple[str, dict]:
-    return symbol, feasibility_for_symbol(symbol, _CTX["bars"][symbol], _CTX["feas_ranges"], FEE_SCENARIOS)
+    return symbol, feasibility_for_symbol(symbol, _CTX["bars"][symbol], _CTX["feas_ranges"], FEE_SCENARIOS,
+                                          cost_model=_CTX["costs"].for_symbol(symbol))
 
 
 def _sens_task(args: tuple[str, str, str]) -> dict:
@@ -427,7 +550,7 @@ def _sens_task(args: tuple[str, str, str]) -> dict:
 
     def run_fn(mp: MomentumParams):
         raw, view, eng = run_one(bars_seg, start_ts, _CTX["rules"], _CTX["risk"], "S1", exit_name, fee, {},
-                                 momentum=mp)
+                                 momentum=mp, costs=_CTX["costs"], bar_s=_CTX["bar_s"])
         return compute_metrics(view)["expectancy_r"]
 
     res = run_sensitivity(run_fn, MomentumParams(), split=split_name, pct=Decimal("0.2"),
@@ -459,40 +582,70 @@ def choose_top_candidate(rows: Sequence[tuple[RunSpec, dict]]) -> tuple[str, str
     return "S1", PRE_REGISTERED_EXIT if PRE_REGISTERED_EXIT in tied else tied[0]
 
 
-def benchmark_rows(split: Split, bars: Mapping[str, Sequence[Candle]], rules: Mapping[str, SymbolRules]) -> list[dict]:
+_FRICTIONLESS = CostModel(taker_rate=Decimal(0), maker_rate=Decimal(0), half_spread_bps=Decimal(0),
+                          impact_k=Decimal(0), impact_cap_bps=Decimal(0))
+
+
+def benchmark_rows(split: Split, bars: Mapping[str, Sequence[Candle]], rules: Mapping[str, SymbolRules],
+                   costs: CostBook | CostModel | None = None, bar_s: int = BAR_S) -> list[dict]:
+    """Equal-weight buy-and-hold per segment and fee scenario (each symbol bought with the whole initial
+    equity at the segment's first open, sold at its last close, with that symbol's costs), plus the
+    frictionless return. A 10000 USDT order is far beyond the calibrated notionals: with recorded costs its
+    impact is extrapolated/capped (see `bh_impact_status`)."""
     out = []
     for name in ("train", "validation"):
-        seg = split.segment(name)
-        seg_bars = {s: [c for c in cs if seg.start_ts <= c.ts <= seg.end_ts] for s, cs in sorted(bars.items())}
+        seg_bars = scored_bars(split, name, bars, bar_s)
+        free = {s: buy_and_hold(cs, INITIAL_EQUITY, _FRICTIONLESS, rules[s].amount_precision)
+                for s, cs in seg_bars.items()}
+        free_rets = [v["net_return"] for v in free.values() if v["net_return"] is not None]
         for label, fee, _ in FEE_SCENARIOS:
-            cm = CostModel(taker_rate=fee, maker_rate=fee)
-            res = {}
+            book = CostModel(taker_rate=fee, maker_rate=fee) if costs is None else costs.with_fee(fee)
             per = {}
             for s, cs in seg_bars.items():
-                per[s] = buy_and_hold(cs, INITIAL_EQUITY, cm, rules[s].amount_precision)
+                per[s] = buy_and_hold(cs, INITIAL_EQUITY, book.for_symbol(s), rules[s].amount_precision)
             rets = [v["net_return"] for v in per.values() if v["net_return"] is not None]
             res = {"net_return": sum(rets) / len(rets) if rets else None,
+                   "frictionless_return": sum(free_rets) / len(free_rets) if free_rets else None,
                    "max_drawdown_worst_symbol": max((v["max_drawdown"] for v in per.values()
                                                      if v["max_drawdown"] is not None), default=None),
-                   "per_symbol_net_return": {s: v["net_return"] for s, v in per.items()}}
+                   "per_symbol_net_return": {s: v["net_return"] for s, v in per.items()},
+                   "bh_impact_status": {s: book.for_symbol(s).impact_status(INITIAL_EQUITY) for s in per}}
             out.append({"split": name, "fee_label": label, "taker_rate": str(fee), **res})
     return out
 
 
+def report_stem(kind: str, prefix: str, bar_minutes: int) -> str:
+    """`backtest_grid` / `backtest_top` file stems: unchanged names for the legacy call (no prefix, 15m),
+    otherwise `<prefix><kind>_<bar>m` (e.g. v2_backtest_grid_60m)."""
+    if not prefix and bar_minutes == 15:
+        return kind
+    return f"{prefix}{kind}_{bar_minutes}m"
+
+
 def run_grid(history_dir: Path | str, out_dir: Path | str, *, symbols: Sequence[str] = DEFAULT_SYMBOLS,
              workers: int = 4, markets_path: Path | str = FIXTURE_MARKETS,
-             sens_only: Sequence[str] = SENSITIVITY_PARAMS) -> dict:
+             sens_only: Sequence[str] = SENSITIVITY_PARAMS, bar_minutes: int = 15, cost_source: str = "proxy",
+             calibration: CostCalibration | None = None, report_prefix: str = "",
+             calibration_path: Path | str | None = None) -> dict:
     """Run the whole exploratory grid on train and validation and write the reports. Returns the report dict.
-    Never reads the TestSetGuard and never builds a backtest on the test segment."""
-    bars, quality = load_bars_15m(history_dir, symbols)
-    rules, rule_src = symbol_rules(symbols, bars, markets_path)
-    split = build_split(bars)
+    Never reads the TestSetGuard and never builds a backtest on the test segment. The defaults reproduce the
+    original run (15m, proxy costs, unprefixed file names)."""
+    if bar_minutes not in BAR_MINUTES:
+        raise ValueError(f"bar_minutes must be one of {BAR_MINUTES}")
+    bar_s = bar_minutes * 60
+    tfs = ("15m",) if bar_minutes == 15 else ("15m", TIMEFRAME_OF[bar_minutes])
+    by_tf, quality = load_bars_tf(history_dir, symbols, tfs)
+    bars15 = by_tf["15m"]
+    bars = by_tf[TIMEFRAME_OF[bar_minutes]]
+    rules, rule_src = symbol_rules(symbols, bars15, markets_path)
+    split = build_split(bars15)           # always the 15m split: same wall-clock segments for every bar size
     risk = load_config(env={}).risk
-    segments = {name: split.bars_for(name, bars, WARMUP_BARS) for name in ("train", "validation")}
+    costs, cost_labels = build_costs(symbols, cost_source, calibration)
+    segments = {name: segment_bars(split, name, bars, bar_s) for name in ("train", "validation")}
     feas_ranges = [(split.train.start_ts, split.train.end_ts), (split.validation.start_ts, split.validation.end_ts)]
     _CTX.clear()
     _CTX.update(bars=bars, rules=rules, risk=risk, segments=segments, feas_ranges=feas_ranges,
-                sens_only=tuple(sens_only))
+                sens_only=tuple(sens_only), costs=costs, bar_s=bar_s)
 
     tasks = [(sp, st, lab, str(fee)) for sp in ("train", "validation") for st in STRATEGIES
              for lab, fee, _ in FEE_SCENARIOS]
@@ -507,46 +660,74 @@ def run_grid(history_dir: Path | str, out_dir: Path | str, *, symbols: Sequence[
     t0 = time.time()
     sens = _pool_map(_sens_task, [("train", top_exit, str(fee0)), ("validation", top_exit, str(fee0))], workers)
     print(f"[runner] sensitivity in {time.time() - t0:.0f}s", file=sys.stderr)
-    bench = benchmark_rows(split, bars, rules)
+    bench = benchmark_rows(split, bars, rules, costs, bar_s)
+    limitations = _limitations(cost_source, bar_minutes)
 
     # full engine reports of the top candidate (train and validation), through backtest.report
     top_reports, top_full = {}, {}
     for name in ("train", "validation"):
         bars_seg, start_ts = segments[name]
-        raw, view, eng = run_one(bars_seg, start_ts, rules, risk, top_strategy, top_exit, fee0, {})
-        rep = build_report(view, title=f"Top candidate {top_strategy}+{top_exit} - {name} (EXPLORATORY)",
+        raw, view, eng = run_one(bars_seg, start_ts, rules, risk, top_strategy, top_exit, fee0, {},
+                                 costs=costs, bar_s=bar_s)
+        rep = build_report(view, title=f"Top candidate {top_strategy}+{top_exit} - {name} - {bar_minutes}m bars, "
+                                       f"{cost_source} costs (EXPLORATORY)",
                            parameters={"strategy": top_strategy, "exit": top_exit, "taker_rate": fee0,
+                                       "bar_minutes": bar_minutes, "cost_source": cost_source,
+                                       "cost_labels": cost_labels,
                                        "engine_result_hash": raw.result_hash,
                                        "engine_inputs_hash": raw.inputs_hash,
                                        "warmup_trimmed_equity_view": True, "split_note": SPLIT_NOTE,
                                        "momentum": text_fields(MomentumParams()),
                                        "exit_params": replace(ExitParams(), fee_rate=fee0),
                                        "risk": risk, "initial_equity": INITIAL_EQUITY},
-                           split=name, limitations=_limitations(), repo_dir=Path(__file__).resolve().parent)
+                           split=name, limitations=limitations, repo_dir=Path(__file__).resolve().parent)
         top_full[name] = rep  # written below, after every git_sha lookup (so reports/ cannot make it "dirty")
         top_reports[name] = {"inputs_hash": rep["inputs_hash"], "result_hash": rep["result_hash"]}
     for name, rep in top_full.items():
-        write_report(rep, out_dir, f"backtest_top_{name}")
+        write_report(rep, out_dir, f"{report_stem('backtest_top', report_prefix, bar_minutes)}_{name}")
 
+    cal_info = None
+    if calibration is not None and cost_source == "recorded":
+        cal_info = {"sha256": calibration.sha256, "quantile": COST_QUANTILE,
+                    "path": Path(calibration_path).name if calibration_path else None,
+                    "inputs": calibration.data["inputs"], "confidence_note": calibration.data["confidence_note"],
+                    "per_symbol": {s: {k: e.get(k) for k in ("samples", "covered_hours", "sessions",
+                                                             "utc_hours_covered", "usable", "reason")}
+                                   for s, e in sorted(calibration.data["symbols"].items()) if s in symbols}}
     inputs = {"symbols": sorted(symbols), "split": split_summary(split),
               "bars_sha256": _bars_digest(bars), "rules": rules}
+    if bar_minutes != 15 or cost_source != "proxy":   # legacy runs keep their exact inputs hash
+        inputs.update(bar_minutes=bar_minutes, cost_source=cost_source, costs=costs,
+                      cost_model_version=COST_MODEL_VERSION)
     report = {
-        "title": "Backtest grid (train + validation only)", "status": EXPLORATORY,
+        "title": f"Backtest grid (train + validation only) - {bar_minutes}m bars, {cost_source} costs",
+        "status": EXPLORATORY,
         "git_head": git_head(),
         "inputs_hash": hashlib.sha256(json.dumps(to_canonical(inputs), sort_keys=True).encode()).hexdigest(),
+        "bar_minutes": bar_minutes, "cost_source": cost_source, "cost_model_version": COST_MODEL_VERSION,
         "inputs": {"symbols": sorted(symbols), "split": split_summary(split), "rules_source": rule_src,
                    "rules": {s: {"amount_precision": r.amount_precision, "price_precision": r.price_precision}
                              for s, r in sorted(rules.items())},
                    "data_quality": quality, "bars_sha256": inputs["bars_sha256"],
                    "initial_equity": str(INITIAL_EQUITY), "risk": to_canonical(risk),
-                   "cooldown": to_canonical(RunnerCooldown()), "lookback_bars": LOOKBACK_BARS},
+                   "cooldown": to_canonical(RunnerCooldown(bar_s=bar_s)), "lookback_bars": LOOKBACK_BARS,
+                   "segment_bars": {name: {"scored": sum(1 for cs in segments[name][0].values()
+                                                         for c in cs if c.ts >= segments[name][1]),
+                                           "warmup": sum(1 for cs in segments[name][0].values()
+                                                         for c in cs if c.ts < segments[name][1]),
+                                           "per_symbol_scored": {s: sum(1 for c in cs if c.ts >= segments[name][1])
+                                                                 for s, cs in segments[name][0].items()}}
+                                    for name in ("train", "validation")}},
+        "costs": {"source": cost_source, "labels": cost_labels, "models": cost_model_summary(costs, cost_labels),
+                  "calibration": cal_info},
         "fee_scenarios": [{"label": lab, "taker_rate": str(fee), "note": note} for lab, fee, note in FEE_SCENARIOS],
         "grid": [{**{"strategy": s.strategy, "exit": s.exit, "fee_label": s.fee_label,
                      "taker_rate": str(s.taker_rate), "split": s.split}, **row} for s, row in grid],
         "benchmark_buy_and_hold": bench,
-        "cost_gate_feasibility": {"note": ("fraction of 15m bars (train+validation segments only, features "
-                                           "available) where the S1 cost gate passes; regime-dependent "
-                                           "threshold (3x favourable, 4x tightened)"),
+        "cost_gate_feasibility": {"note": (f"fraction of {bar_minutes}m bars (train+validation segments only, "
+                                           "features available) where the S1 cost gate passes, with each "
+                                           "symbol's own cost model; regime-dependent threshold (3x favourable, "
+                                           "4x tightened)"),
                                   "per_symbol": feas, "required_atr_pct": _required_table(),
                                   "atr_band": [MomentumParams().atr_pct_min, MomentumParams().atr_pct_max]},
         "top_candidate": {"strategy": top_strategy, "exit": top_exit, "fee_label": FEE_SCENARIOS[0][0],
@@ -554,16 +735,19 @@ def run_grid(history_dir: Path | str, out_dir: Path | str, *, symbols: Sequence[
                                        "trades; ties/none -> pre-registered E4",
                           "reports": top_reports},
         "sensitivity": sens,
-        "limitations": _limitations(),
+        "limitations": limitations,
     }
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "backtest_grid.json").write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n")
-    (out / "backtest_grid.md").write_text(render_grid_markdown(report))
+    stem = report_stem("backtest_grid", report_prefix, bar_minutes)
+    (out / f"{stem}.json").write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n")
+    (out / f"{stem}.md").write_text(render_grid_markdown(report))
     return report
 
 
 def _required_table() -> dict:
+    """Round-trip cost and the ATR% the gate needs under the PROXY model (per-symbol recorded values are in
+    `cost_gate_feasibility.per_symbol`)."""
     p = MomentumParams()
     return {lab: {"round_trip_cost_bps": float(CostModel(taker_rate=fee).market_context().round_trip_cost_bps),
                   "atr_pct_needed_favourable": required_atr_pct(p, CostModel(taker_rate=fee).market_context(),
@@ -573,13 +757,25 @@ def _required_table() -> dict:
             for lab, fee, _ in FEE_SCENARIOS}
 
 
-def _limitations() -> str:
-    return (EXPLORATORY + " The universe was ranked by CURRENT 24h volume (selection bias). Window ~45 days. "
-            "Engine limitations: fills at next-bar open/level touch with half-spread 7.5 bps and an impact proxy; "
-            "fees are placeholders/assumptions; the cost gate is fed the engine's worst-case slippage cap "
-            "(50 bps) plus the full spread, so the round-trip cost it sees is much larger than realised "
-            "costs. Warm-up bars before each segment are excluded from metrics. Missing-minute bars are kept "
-            "and counted. No parameters were tuned.")
+def _limitations(cost_source: str = "proxy", bar_minutes: int = 15) -> str:
+    common = (EXPLORATORY + " The universe was ranked by CURRENT 24h volume (selection bias). Window ~45 days. ")
+    if cost_source == "recorded":
+        cost = ("Costs: per-symbol p90 half spread and a p90 impact curve calibrated from a few hours of recorded "
+                "order books (one or two sessions, top 10 levels; NOT representative of all hours or regimes; see "
+                "docs/COSTS.md); symbols without a usable calibration use the proxy model and are labelled. Fills "
+                "at next-bar open/level touch; take-profits also pay taker costs. Fees are placeholders/assumptions "
+                "charged in quote (Wallex fee unverified). The S1 cost gate sees the recorded full spread plus the "
+                "round-trip impact at 1000 USDT. ")
+    else:
+        cost = ("Engine limitations: fills at next-bar open/level touch with half-spread 7.5 bps and an impact "
+                "proxy; fees are placeholders/assumptions; the cost gate is fed the engine's worst-case slippage cap "
+                "(50 bps) plus the full spread, so the round-trip cost it sees is much larger than realised "
+                "costs. ")
+    bars = ("" if bar_minutes == 15 else
+            f"{bar_minutes}m bars over ~45 days give few bars per segment (S0/S1 need 50-120 bars of history first) "
+            "and therefore few trades and low statistical power. ")
+    return (common + cost + bars + "Warm-up bars before each segment are excluded from metrics. Missing-minute "
+            "bars are kept and counted. No parameters were tuned.")
 
 
 def _bars_digest(bars: Mapping[str, Sequence[Candle]]) -> str:
@@ -613,12 +809,41 @@ def render_grid_markdown(r: Mapping[str, Any]) -> str:
         s = sp[name]
         note = " (RESERVED, not evaluated)" if name == "test" else ""
         L.append(f"  - {name}: {s['start']} .. {s['end_last_bar']} ({s['bars']} bars){note}")
+    recorded = r.get("cost_source") == "recorded"
+    bar_m = r.get("bar_minutes", 15)
+    seg_bars = r["inputs"].get("segment_bars")
+    if seg_bars:
+        L.append(f"- {bar_m}m bars per run (all symbols): train {seg_bars['train']['scored']} scored + "
+                 f"{seg_bars['train']['warmup']} warm-up; validation {seg_bars['validation']['scored']} scored + "
+                 f"{seg_bars['validation']['warmup']} warm-up")
+    impact_note = ("Costs are the per-symbol recorded model (see the cost table below); impact is NOT at a proxy cap."
+                   if recorded else
+                   "Impact cost is mostly at the model's 50 bps cap because the liquidity proxy (previous bar "
+                   "notional) is small next to 1000 USDT orders.")
     L += ["", "Reading notes: a max drawdown near 8% is the RiskConfig soft-drawdown limit (`drawdown_soft_pct` 8): "
-          "new entries are blocked after it, which is why many losing runs end at about -8%. Impact cost is "
-          "mostly at the model's 50 bps cap because the liquidity proxy (previous 15m bar notional) is small "
-          "next to 1000 USDT orders. Metrics exclude warm-up bars; 'bars' in the per-run reports counts the "
-          "scored segment, the header's bar count includes warm-up.", "", "Fee scenarios:"]
+          "new entries are blocked after it, which is why many losing runs end at about -8%. " + impact_note +
+          " Metrics exclude warm-up bars; 'bars' in the per-run reports counts the scored segment, the header's bar "
+          f"count is 15m bars. Trade counts below {MIN_MEANINGFUL_TRADES} are flagged `(n<{MIN_MEANINGFUL_TRADES})`: "
+          "too few for any statistical statement.", "", "Fee scenarios:"]
     L += [f"- `{f['label']}` taker {f['taker_rate']}: {f['note']}" for f in r["fee_scenarios"]]
+    costs = r.get("costs")
+    if costs:
+        cal = costs.get("calibration")
+        L += ["", "## Cost model per symbol", ""]
+        if cal:
+            L += [f"Calibration `{cal.get('path')}` sha256 `{cal['sha256']}`, quantile {cal['quantile']}. "
+                  f"**{cal['confidence_note']}**", ""]
+        labels_fee = [f["label"] for f in r["fee_scenarios"]]
+        L += ["| symbol | source | half spread (bps) | impact at 1000 USDT (bps) | impact curve (USDT: bps) | cap | "
+              + " | ".join(f"round trip @{x} (bps)" for x in labels_fee) + " |",
+              "|---|---|---|---|---|---|" + "---|" * len(labels_fee)]
+        for s, m in costs["models"].items():
+            curve = ", ".join(f"{n}: {b}" for n, b in m["impact_curve"]) if m["impact_curve"] else "proxy (volume)"
+            imp = m["impact_at_1000_bps"]
+            imp_s = "proxy" if imp is None else f"{Decimal(imp):.2f} ({m['impact_status_at_1000']})"
+            L.append(f"| {s} | {m['source']} | {Decimal(m['half_spread_bps']):.2f} | {imp_s} | {curve} | "
+                     f"{m['impact_cap_bps']} | "
+                     + " | ".join(f"{Decimal(m['round_trip_cost_bps'][x]):.1f}" for x in labels_fee) + " |")
     for split in ("train", "validation"):
         L += ["", f"## {split.capitalize()} results", "",
               "| strategy | exit | fee | net return | max DD | trades | win rate | PF | exp (R) | Sharpe | "
@@ -627,33 +852,46 @@ def render_grid_markdown(r: Mapping[str, Any]) -> str:
         for g in r["grid"]:
             if g["split"] != split:
                 continue
+            low = f" (n<{MIN_MEANINGFUL_TRADES})" if g.get("low_n") else ""
             L.append(f"| {g['strategy']} | {g['exit']} | {g['fee_label']} | {_pct(g['net_return'])} | "
-                     f"{_pct(g['max_drawdown'])} | {g['trade_count']} | {_pct(g['win_rate'])} | "
+                     f"{_pct(g['max_drawdown'])} | {g['trade_count']}{low} | {_pct(g['win_rate'])} | "
                      f"{_f(g['profit_factor'], 3)} | {_f(g['expectancy_r'], 3)} | {_f(g['sharpe'], 3)} | "
                      f"{g['signals']}/{g['evaluations']} | {g['fees']:.1f} | {g['spread_cost']:.1f} | "
                      f"{g['impact_cost']:.1f} | {g['gross_pnl']:.1f} |")
-        L += ["", "Cost shares of |gross P&L| (fee / spread / impact) and abstentions:", "",
-              "| strategy | exit | fee | fee share | spread share | impact share | abstentions | events |",
-              "|---|---|---|---|---|---|---|---|"]
+        L += ["", "Cost shares of |gross P&L| (fee / spread / impact), abstentions, how fills were priced, events:", "",
+              "| strategy | exit | fee | fee share | spread share | impact share | abstentions | fill pricing | "
+              "events |",
+              "|---|---|---|---|---|---|---|---|---|"]
         for g in r["grid"]:
             if g["split"] != split:
                 continue
             ev = ", ".join(f"{k}={v}" for k, v in g["events"].items()) or "-"
+            fp = ", ".join(f"{k}={v}" for k, v in (g.get("fill_impact_status") or {}).items()) or "-"
             L.append(f"| {g['strategy']} | {g['exit']} | {g['fee_label']} | {_f(g['fee_share_of_gross'], 3)} | "
                      f"{_f(g['spread_share_of_gross'], 3)} | {_f(g['slippage_share_of_gross'], 3)} | "
-                     f"{g['abstentions']} | {ev} |")
+                     f"{g['abstentions']} | {fp} | {ev} |")
     L += ["", "## Buy-and-hold benchmark (equal weight over the universe, same costs)", "",
-          "| split | fee | mean net return | worst per-symbol max DD |", "|---|---|---|---|"]
-    L += [f"| {b['split']} | {b['fee_label']} | {_pct(b['net_return'])} | {_pct(b['max_drawdown_worst_symbol'])} |"
-          for b in r["benchmark_buy_and_hold"]]
+          "Each symbol is bought with the whole 10000 USDT at the segment's first open and sold at its last close; "
+          "with recorded costs a 10000 USDT order is beyond the calibrated notionals (extrapolated or capped impact).",
+          "", "| split | fee | mean net return | frictionless return | worst per-symbol max DD |", "|---|---|---|---|---|"]
+    L += [f"| {b['split']} | {b['fee_label']} | {_pct(b['net_return'])} | {_pct(b.get('frictionless_return'))} | "
+          f"{_pct(b['max_drawdown_worst_symbol'])} |" for b in r["benchmark_buy_and_hold"]]
     feas = r["cost_gate_feasibility"]
     L += ["", "## S1 cost-gate feasibility", "", feas["note"] + ".", "",
-          "ATR/close needed for the gate to pass (S1 atr band is "
+          "Proxy-model reference: ATR/close needed for the gate to pass (S1 atr band is "
           f"[{feas['atr_band'][0]}, {feas['atr_band'][1]}]):", "",
           "| fee | round-trip cost (bps) | ATR% needed (favourable) | ATR% needed (tightened) |", "|---|---|---|---|"]
     L += [f"| {k} | {v['round_trip_cost_bps']:.0f} | {_pct(v['atr_pct_needed_favourable'])} | "
           f"{_pct(v['atr_pct_needed_tightened'])} |" for k, v in feas["required_atr_pct"].items()]
     labels = [f["label"] for f in r["fee_scenarios"]]
+    if any("round_trip_cost_bps" in d for d in feas["per_symbol"].values()):
+        L += ["", "Per symbol, with its own cost model: round-trip cost the gate sees (bps) / ATR% needed "
+              "(favourable regime):", "",
+              "| symbol | cost source | " + " | ".join(labels) + " |", "|---|---|" + "---|" * len(labels)]
+        for s, d in feas["per_symbol"].items():
+            L.append(f"| {s} | {d.get('cost_source')} | " + " | ".join(
+                f"{d['round_trip_cost_bps'][k]:.0f} / {_pct(d['atr_pct_needed_favourable'][k])}" for k in labels)
+                + " |")
     L += ["", "Fraction of usable-feature bars where the cost gate passes (bars without usable features, e.g. too "
           "many zero-volume bars or a zero median volume, make S1 abstain regardless):", "",
           "| symbol | bars in train+val | usable-feature bars | median ATR% | p90 ATR% | max ATR% | "
@@ -675,9 +913,85 @@ def render_grid_markdown(r: Mapping[str, Any]) -> str:
           "|---|---|---|---|---|"]
     for s, q in r["inputs"]["data_quality"].items():
         rl = r["inputs"]["rules"][s]
+        extra = (f"; 1h: {q['bars_1h']} bars, {q['bars_with_missing_minutes_1h']} with missing minutes"
+                 if "bars_1h" in q else "")
         L.append(f"| {s} | {q['bars_15m']} | {q['bars_with_missing_minutes']} | {q['zero_volume_bars']} | "
-                 f"{r['inputs']['rules_source'][s]}: amount {rl['amount_precision']}, price {rl['price_precision']} |")
+                 f"{r['inputs']['rules_source'][s]}: amount {rl['amount_precision']}, price {rl['price_precision']}"
+                 f"{extra} |")
     L += ["", "## Limitations", "", r["limitations"], ""]
+    return "\n".join(L)
+
+
+def best_worst_exits(report: Mapping[str, Any], strategy: str) -> tuple[str, str]:
+    """(best, worst) exit of `strategy` by TRAIN net return at the primary fee (ties: exit name). Chosen on
+    train so the validation columns stay out-of-sample for that choice."""
+    rows = sorted(((g["net_return"], g["exit"]) for g in report["grid"]
+                   if g["strategy"] == strategy and g["split"] == "train" and g["fee_label"] == FEE_SCENARIOS[0][0]),
+                  key=lambda t: (-t[0], t[1]))
+    return rows[0][1], rows[-1][1]
+
+
+def render_summary_markdown(reports: Sequence[Mapping[str, Any]], title: str = "Backtest v2 summary") -> str:
+    """One page over several grid reports (e.g. 15m and 60m): best/worst exit per strategy on train with its
+    train and validation numbers at every fee, an objective evidence count, buy-and-hold and the S1 gate."""
+    L = [f"# {title}", "", f"**{EXPLORATORY}**", "",
+         "Best / worst exit = highest / lowest TRAIN net return at the primary fee (0.0035, placeholder); the "
+         "validation numbers of that exit are therefore out-of-sample for the choice. Test segment NOT evaluated. "
+         f"`(n<{MIN_MEANINGFUL_TRADES})` marks trade counts too small for any statistical statement.", ""]
+    for r in reports:
+        L.append(f"- {r['bar_minutes']}m bars, {r['cost_source']} costs: inputs hash `{r['inputs_hash']}`, "
+                 f"git `{r['git_head']}`")
+    L += ["", "| bars | strategy | exit | split | fee | net return | max DD | trades | win rate | PF | exp (R) | "
+          "fee / spread / impact share of gross |", "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in reports:
+        for st in STRATEGIES:
+            best, worst = best_worst_exits(r, st)
+            train0 = {g["exit"]: g["net_return"] for g in r["grid"] if g["strategy"] == st
+                      and g["split"] == "train" and g["fee_label"] == FEE_SCENARIOS[0][0]}
+            tied = train0[best] == train0[worst]
+            for tag, ex in (("best", best), ("worst", worst)):
+                tag = "all exits tied" if tied else tag
+                for split in ("train", "validation"):
+                    for lab, _fee, _ in FEE_SCENARIOS:
+                        g = next(x for x in r["grid"] if x["strategy"] == st and x["exit"] == ex
+                                 and x["split"] == split and x["fee_label"] == lab)
+                        low = f" (n<{MIN_MEANINGFUL_TRADES})" if g.get("low_n") else ""
+                        L.append(f"| {r['bar_minutes']}m | {st} | {ex} ({tag}) | {split} | {lab} | "
+                                 f"{_pct(g['net_return'])} | {_pct(g['max_drawdown'])} | {g['trade_count']}{low} | "
+                                 f"{_pct(g['win_rate'])} | {_f(g['profit_factor'], 3)} | {_f(g['expectancy_r'], 3)} | "
+                                 f"{_f(g['fee_share_of_gross'], 2)} / {_f(g['spread_share_of_gross'], 2)} / "
+                                 f"{_f(g['slippage_share_of_gross'], 2)} |")
+    L += ["", "## Evidence count (all exits)", "",
+          "Configurations (strategy x exit) with a positive net return on BOTH train and validation, and how many of "
+          f"those have >= {MIN_MEANINGFUL_TRADES} trades in each split:", "",
+          "| bars | fee | positive on train | positive on validation | positive on both | ... with n >= 30 in both |",
+          "|---|---|---|---|---|---|"]
+    for r in reports:
+        for lab, _fee, _ in FEE_SCENARIOS:
+            pos = {sp: {(g["strategy"], g["exit"]) for g in r["grid"]
+                        if g["split"] == sp and g["fee_label"] == lab and g["net_return"] > 0}
+                   for sp in ("train", "validation")}
+            big = {sp: {(g["strategy"], g["exit"]) for g in r["grid"]
+                        if g["split"] == sp and g["fee_label"] == lab and not g.get("low_n")}
+                   for sp in ("train", "validation")}
+            both = pos["train"] & pos["validation"]
+            L.append(f"| {r['bar_minutes']}m | {lab} | {len(pos['train'])}/8 | {len(pos['validation'])}/8 | "
+                     f"{len(both)} {sorted(both) if both else ''} | {len(both & big['train'] & big['validation'])} |")
+    L += ["", "## Buy-and-hold (equal weight, same costs)", "",
+          "| bars | split | fee | mean net return | frictionless |", "|---|---|---|---|---|"]
+    for r in reports:
+        L += [f"| {r['bar_minutes']}m | {b['split']} | {b['fee_label']} | {_pct(b['net_return'])} | "
+              f"{_pct(b.get('frictionless_return'))} |" for b in r["benchmark_buy_and_hold"]]
+    labels = [lab for lab, _f2, _ in FEE_SCENARIOS]
+    L += ["", "## S1 cost gate under the run's costs (bars where the gate passes / usable-feature bars)", "",
+          "| bars | symbol | cost source | " + " | ".join(f"{x}: pass (RT bps)" for x in labels)
+          + " | all other rules pass |", "|---|---|---|" + "---|" * len(labels) + "---|"]
+    for r in reports:
+        for s, d in r["cost_gate_feasibility"]["per_symbol"].items():
+            L.append(f"| {r['bar_minutes']}m | {s} | {d.get('cost_source')} | " + " | ".join(
+                f"{d['gate_pass'][k]}/{d['bars']} ({d['round_trip_cost_bps'][k]:.0f})" for k in labels)
+                + f" | {d['all_other_rules_pass_ignoring_cost_gate']} |")
+    L += ["", "## Limitations", ""] + [f"- {r['bar_minutes']}m: {r['limitations']}" for r in reports] + [""]
     return "\n".join(L)
 
 

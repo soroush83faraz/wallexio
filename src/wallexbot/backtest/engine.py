@@ -67,7 +67,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from decimal import Decimal, localcontext
 from typing import Any, Callable, Mapping, Sequence
 
-from wallexbot.backtest.costs import EXACT, CostModel, FillCost, round_up
+from wallexbot.backtest.costs import COST_MODEL_VERSION, EXACT, CostBook, CostModel, FillCost, round_up
 from wallexbot.config import RiskConfig
 from wallexbot.data.candles import Candle
 from wallexbot.strategy.contract import ExitDecision, ExitPolicy, PositionState, Signal, SignalEngine
@@ -314,7 +314,9 @@ class _Sim:
         self.fills: list[SimFill] = []
         self.events: list[Event] = []
         self.curve: list[EquityPoint] = []
-        self.market = cost_model.market_context()
+        # per-symbol cost model (a CostBook) or one model for all; signal engines see that symbol's costs
+        self.cms = {s: cost_model.for_symbol(s) for s in self.symbols}
+        self.markets = {s: self.cms[s].market_context() for s in self.symbols}
         try:  # optional extension of the ExitPolicy protocol
             self.targets_fn = exit_policy.targets if callable(exit_policy.targets) else None
         except AttributeError:
@@ -373,7 +375,7 @@ class _Sim:
         remainder = pos.qty - qty
         if remainder > 0 and remainder * ref < min_notional_for(rules, self.risk):
             qty, reason = pos.qty, reason + "+dust"  # never leave an unsellable remainder
-        cost = self.cm.fill("SELL", ref, qty, liquidity, rules.price_precision)
+        cost = self.cms[pos.symbol].fill("SELL", ref, qty, liquidity, rules.price_precision)
         f = self._record(ts, pos.symbol, "SELL", kind, reason, ref, qty, cost)
         with localcontext(EXACT):
             self.cash += cost.notional - cost.fee
@@ -431,21 +433,21 @@ class _Sim:
             held = sum((p.qty * self.price_now(sym, ts) for sym, p in self.positions.items()), _ZERO)
             equity = self.cash + held
         headroom = equity * self.risk.max_exposure_pct / _HUNDRED - held
-        rules, liq = self.rules[s], self.liquidity(s, i)
+        rules, liq, cm = self.rules[s], self.liquidity(s, i), self.cms[s]
 
         def size(px: Decimal):
-            return size_position(equity, px, stop, rules, self.risk, self.cash, self.cm.taker_rate,
+            return size_position(equity, px, stop, rules, self.risk, self.cash, cm.taker_rate,
                                  None, sig.score, min_depth_multiple=self.p.min_depth_multiple,
                                  exposure_headroom=headroom)
 
-        r1 = size(round_up(bar.open * (1 + self.cm.half_spread), rules.price_precision))  # no impact yet
+        r1 = size(round_up(bar.open * (1 + cm.half_spread), rules.price_precision))  # no impact yet
         if not r1.ok:
             return self.event(ts, s, "entry_rejected", ",".join(r1.reasons))
-        c1 = self.cm.fill("BUY", bar.open, r1.qty, liq, rules.price_precision)
+        c1 = cm.fill("BUY", bar.open, r1.qty, liq, rules.price_precision)
         r2 = size(c1.price)
         if not r2.ok:
             return self.event(ts, s, "entry_rejected", ",".join(r2.reasons))
-        c2 = self.cm.fill("BUY", bar.open, r2.qty, liq, rules.price_precision)
+        c2 = cm.fill("BUY", bar.open, r2.qty, liq, rules.price_precision)
         if c2.price > c1.price or c2.notional + c2.fee > self.cash:
             raise RuntimeError("sizing monotonicity broken")  # cannot happen: impact is monotone in qty
         if c2.price <= stop:
@@ -578,7 +580,7 @@ class _Sim:
             if s in self.positions or s in self.pending_exits:
                 continue
             bar = self.bars[s][i]
-            sig = self.se.evaluate(s, self.view(s, i), self.market)
+            sig = self.se.evaluate(s, self.view(s, i), self.markets[s])
             if sig is None:
                 continue
             if sig.symbol != s or sig.bar_ts != bar.ts:
@@ -633,7 +635,7 @@ def _validate(bars_by_symbol, rules, initial_equity, params) -> dict[str, list[C
 def inputs_hash(bars_by_symbol, signal_engine, exit_policy, cost_model, risk, rules, initial_equity, params,
                 cooldown=None) -> str:
     return stable_hash({
-        "engine": ENGINE_VERSION,
+        "engine": ENGINE_VERSION, "cost_model_version": COST_MODEL_VERSION,
         "bars": {s: [[c.ts, c.open, c.high, c.low, c.close, c.volume, c.missing] for c in bars_by_symbol[s]]
                  for s in sorted(bars_by_symbol)},
         "signal_engine": _component_id(signal_engine), "exit_policy": _component_id(exit_policy),
@@ -644,7 +646,7 @@ def inputs_hash(bars_by_symbol, signal_engine, exit_policy, cost_model, risk, ru
 
 
 def run_backtest(bars_by_symbol: Mapping[str, Sequence[Candle]], signal_engine: SignalEngine,
-                 exit_policy: ExitPolicy, cost_model: CostModel, risk: RiskConfig,
+                 exit_policy: ExitPolicy, cost_model: CostModel | CostBook, risk: RiskConfig,
                  rules: Mapping[str, SymbolRules], initial_equity: Decimal,
                  params: BacktestParams | None = None, *, cooldown: Cooldown | None = None) -> BacktestResult:
     params = params or BacktestParams()
