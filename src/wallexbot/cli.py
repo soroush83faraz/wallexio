@@ -2,7 +2,9 @@
 
     demo       scripted mock round trip (signal -> risk -> OMS -> MockWallex), pretty-printed
     backtest   exploratory grid on train+validation of local 1m history (see backtest/runner.py);
+               `--cost-source recorded|proxy`, `--bar-minutes 15 60`, `--report-prefix v2_`;
                `--final-test --params-file frozen.json` is the single-use test-set evaluation
+    calibrate-costs  spread/slippage calibration from recorded order books -> reports/cost_calibration.json
     doctor     read-only account preflight; needs WALLEX_API_KEY_READ in the environment (exit 2 without it)
     guardian   guardian demo loop, mock/shadow only
     bot        autonomous loop, mock (paper; offline with --replay-from) or shadow (live public book, simulated
@@ -57,10 +59,57 @@ def _backtest(args: argparse.Namespace) -> int:
     if args.params_file:
         print("refused: --params-file is only used together with --final-test", file=sys.stderr)
         return 2
-    rep = runner.run_grid(args.history_dir, args.out_dir, symbols=symbols, workers=args.workers)
-    print(runner.render_grid_markdown(rep))
-    print(f"\nreports written to {Path(args.out_dir)} (backtest_grid.*, backtest_top_*.*); "
-          f"runtime {time.time() - started:.0f}s; test segment NOT evaluated")
+    from wallexbot.backtest.calibrate import CostCalibration
+    cal_path = Path(args.calibration) if args.calibration else runner.CALIBRATION_DEFAULT
+    source = args.cost_source or ("recorded" if cal_path.is_file() else "proxy")
+    calibration = None
+    if source == "recorded":
+        if not cal_path.is_file():
+            print(f"refused: --cost-source recorded needs a calibration file ({cal_path} not found; run "
+                  "`python -m wallexbot calibrate-costs`)", file=sys.stderr)
+            return 2
+        calibration = CostCalibration.load(cal_path)
+    reports = []
+    for minutes in args.bar_minutes:
+        rep = runner.run_grid(args.history_dir, args.out_dir, symbols=symbols, workers=args.workers,
+                              bar_minutes=minutes, cost_source=source, calibration=calibration,
+                              report_prefix=args.report_prefix, calibration_path=cal_path if calibration else None,
+                              **({"sens_only": ()} if args.skip_sensitivity else {}))
+        reports.append(rep)
+        print(runner.render_grid_markdown(rep))
+    if args.report_prefix:
+        summary = Path(args.out_dir) / f"{args.report_prefix}summary.md"
+        summary.write_text(runner.render_summary_markdown(reports, title=f"Backtest {args.report_prefix.rstrip('_')} "
+                                                                         f"summary ({source} costs)"))
+    print(f"\nreports written to {Path(args.out_dir)} (prefix {args.report_prefix!r}, bars {args.bar_minutes}, "
+          f"cost source {source}); runtime {time.time() - started:.0f}s; test segment NOT evaluated")
+    return 0
+
+
+def _calibrate(args: argparse.Namespace) -> int:
+    """Copy the recorder's depth files to a temporary directory (the recorder may be writing), calibrate
+    on the copies, write the JSON (+ a Markdown rendering next to it)."""
+    import shutil
+    import tempfile
+    from wallexbot.backtest.calibrate import calibrate_costs, render_calibration_markdown
+    from wallexbot.backtest.runner import DEFAULT_SYMBOLS
+    src = sorted(Path(args.recorder_dir).glob("depth_*.jsonl"))
+    if not src:
+        print(f"no depth_*.jsonl files in {args.recorder_dir}", file=sys.stderr)
+        return 2
+    with tempfile.TemporaryDirectory() as tmp:
+        copies = []
+        for p in src:
+            dst = Path(tmp) / p.name
+            shutil.copyfile(p, dst)
+            copies.append(dst)
+        cal = calibrate_costs(copies, tuple(args.symbols) if args.symbols else DEFAULT_SYMBOLS,
+                              tuple(args.notionals))
+    out = cal.save(args.out)
+    md = out.with_suffix(".md")
+    md.write_text(render_calibration_markdown(cal))
+    print(render_calibration_markdown(cal))
+    print(f"calibration written to {out} and {md} (sha256 {cal.sha256})")
     return 0
 
 
@@ -118,7 +167,26 @@ def build_parser() -> argparse.ArgumentParser:
                    help="single-use test-set evaluation; requires --params-file")
     b.add_argument("--params-file", type=Path, help="frozen.json for --final-test")
     b.add_argument("--ledger", type=Path, default=None, help="test-set ledger (default reports/test_set_ledger.jsonl)")
+    b.add_argument("--cost-source", choices=("recorded", "proxy"), default=None,
+                   help="execution costs: 'recorded' (calibrated from order books; per symbol, proxy where no "
+                        "calibration) or 'proxy' (volume proxy). Default: recorded when the calibration exists")
+    b.add_argument("--calibration", type=Path, default=None,
+                   help="cost calibration JSON (default reports/cost_calibration.json)")
+    b.add_argument("--bar-minutes", type=int, nargs="+", choices=(15, 60), default=[15],
+                   help="bar size(s) S0/S1 are evaluated on (15 and/or 60); 60 gives few bars and low power")
+    b.add_argument("--report-prefix", default="v2_",
+                   help="report file prefix (default v2_; files <prefix>backtest_grid_<bar>m.*, <prefix>summary.md)")
+    b.add_argument("--skip-sensitivity", action="store_true", help="skip the +/-20%% sensitivity of the top S1 variant")
     b.set_defaults(func=_backtest)
+
+    c = sub.add_parser("calibrate-costs", help="calibrate spread/slippage from recorded order books")
+    c.add_argument("--recorder-dir", type=Path, default=Path("data") / "recorder",
+                   help="directory with depth_YYYYMMDD.jsonl (default data/recorder); files are copied first")
+    c.add_argument("--symbols", nargs="+", help="override the default 7-symbol universe")
+    c.add_argument("--notionals", nargs="+", type=int, default=[250, 500, 1000, 2500], help="order sizes, quote")
+    c.add_argument("--out", type=Path, default=DEFAULT_OUT_DIR / "cost_calibration.json",
+                   help="output JSON (default reports/cost_calibration.json; a .md rendering is written next to it)")
+    c.set_defaults(func=_calibrate)
 
     r = sub.add_parser("doctor", help=f"read-only preflight (needs {READ_KEY_ENV})")
     r.set_defaults(func=_doctor)

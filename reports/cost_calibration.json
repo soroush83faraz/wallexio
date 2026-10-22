@@ -1,0 +1,1108 @@
+{
+  "calibration_sha256": "3ed8c7993ededa96f526037a1db264269f84d0adad7a8c925326749d845e6cdc",
+  "confidence_note": "LOW CONFIDENCE. These numbers describe only the recorded snapshots: a few hours of one or two sessions, top 10 levels, ~15-35 s sampling. Spreads and depth vary by hour of day, weekday, volatility regime and news; a quiet-hours p90 can be far below a volatile-hours median. Hidden or deeper liquidity, queue dynamics, latency and our own market impact on subsequent snapshots are not captured. Refresh after several days covering all UTC hours before relying on them.",
+  "inputs": [
+    {
+      "bad_lines": 0,
+      "file": "depth_20261021.jsonl",
+      "lines": 742,
+      "rows": 742,
+      "sha256": "3cccd60f98fe118a94f2786af1203097348f5b6d23058d7d73eda6f0c5a5c54e",
+      "torn_last_line": false
+    },
+    {
+      "bad_lines": 0,
+      "file": "depth_20261022.jsonl",
+      "lines": 294,
+      "rows": 294,
+      "sha256": "547041daba4cd2de6ca167466c177f844d7751f0c10709a570a8c86420160780",
+      "torn_last_line": false
+    }
+  ],
+  "method": {
+    "impact_beyond_touch": "VWAP vs best ask (BUY) / best bid (SELL), in bps of mid; slippage_vs_mid = half_spread + impact_beyond_touch per snapshot",
+    "min_samples_for_usable": 20,
+    "quantiles": "upper nearest-rank over valid snapshots (each snapshot weighs the same); snapshots whose visible depth is below N rank as +inf, so such a quantile is null",
+    "rounding": "Decimal, rounded UP to 0.01 bps",
+    "slippage_vs_mid": "VWAP of a marketable order of N quote walking the recorded levels, vs mid, bps",
+    "spread": "(best_ask - best_bid) / mid * 1e4 per snapshot; half spread = spread / 2"
+  },
+  "notionals_quote": [
+    "250",
+    "500",
+    "1000",
+    "2500"
+  ],
+  "symbols": {
+    "BTCUSDT": {
+      "confidence": "low",
+      "confidence_note": "148 snapshots over 1.2 covered hours in 3 session(s), UTC hours 04-05,22-23; NOT representative of other hours, days or volatility regimes.",
+      "covered_hours": "1.19",
+      "first": "2026-10-21T22:37:44Z",
+      "half_spread_bps": {
+        "median": "8.92",
+        "p90": "11.68"
+      },
+      "impact_beyond_touch_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.02",
+            "p90": "0.06"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.01",
+            "p90": "0.01"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "0.03",
+            "p90": "0.08"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.01",
+            "p90": "0.03"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.76",
+            "p90": "6.67"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.01",
+            "p90": "0.02"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 92,
+            "median": null,
+            "p90": null
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.01",
+            "p90": "0.42"
+          }
+        }
+      },
+      "invalid_snapshots": 0,
+      "last": "2026-10-22T05:12:22Z",
+      "median_interval_s": "27.7",
+      "notionals_with_p90": [
+        "250",
+        "500",
+        "1000"
+      ],
+      "reason": "ok",
+      "samples": 148,
+      "sessions": 3,
+      "slippage_vs_mid_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "9.02",
+            "p90": "11.73"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "8.92",
+            "p90": "11.68"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "9.14",
+            "p90": "11.79"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "8.95",
+            "p90": "11.70"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "10.08",
+            "p90": "16.89"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "8.94",
+            "p90": "11.91"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 92,
+            "median": null,
+            "p90": null
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "9.11",
+            "p90": "12.26"
+          }
+        }
+      },
+      "span_hours": "6.58",
+      "spread_bps": {
+        "max": "32.64",
+        "median": "17.84",
+        "p90": "23.36"
+      },
+      "usable": true,
+      "utc_hours_covered": [
+        4,
+        5,
+        22,
+        23
+      ],
+      "visible_depth_quote": {
+        "BUY": {
+          "median": "58746.33",
+          "p10": "30269.32"
+        },
+        "SELL": {
+          "median": "1802.56",
+          "p10": "1465.09"
+        }
+      }
+    },
+    "ETHUSDT": {
+      "confidence": "low",
+      "confidence_note": "148 snapshots over 1.2 covered hours in 3 session(s), UTC hours 04-05,22-23; NOT representative of other hours, days or volatility regimes.",
+      "covered_hours": "1.19",
+      "first": "2026-10-21T22:37:46Z",
+      "half_spread_bps": {
+        "median": "13.17",
+        "p90": "26.62"
+      },
+      "impact_beyond_touch_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.14",
+            "p90": "14.31"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.06",
+            "p90": "0.79"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.17",
+            "p90": "15.52"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.10",
+            "p90": "1.09"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "2.13",
+            "p90": "19.90"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.00",
+            "p90": "0.04"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 7,
+            "median": "22.04",
+            "p90": "47.05"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.08",
+            "p90": "5.66"
+          }
+        }
+      },
+      "invalid_snapshots": 0,
+      "last": "2026-10-22T05:12:23Z",
+      "median_interval_s": "27.6",
+      "notionals_with_p90": [
+        "250",
+        "500",
+        "1000",
+        "2500"
+      ],
+      "reason": "ok",
+      "samples": 148,
+      "sessions": 3,
+      "slippage_vs_mid_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "16.45",
+            "p90": "29.81"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "15.44",
+            "p90": "27.92"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "17.15",
+            "p90": "31.88"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "16.27",
+            "p90": "29.03"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "20.29",
+            "p90": "42.68"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "13.17",
+            "p90": "26.71"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 7,
+            "median": "41.37",
+            "p90": "75.16"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "13.40",
+            "p90": "31.22"
+          }
+        }
+      },
+      "span_hours": "6.58",
+      "spread_bps": {
+        "max": "64.11",
+        "median": "26.34",
+        "p90": "53.24"
+      },
+      "usable": true,
+      "utc_hours_covered": [
+        4,
+        5,
+        22,
+        23
+      ],
+      "visible_depth_quote": {
+        "BUY": {
+          "median": "37717.51",
+          "p10": "24248.91"
+        },
+        "SELL": {
+          "median": "11375.70",
+          "p10": "4528.96"
+        }
+      }
+    },
+    "PEPEUSDT": {
+      "confidence": "low",
+      "confidence_note": "148 snapshots over 1.2 covered hours in 3 session(s), UTC hours 04-05,22-23; NOT representative of other hours, days or volatility regimes.",
+      "covered_hours": "1.19",
+      "first": "2026-10-21T22:37:50Z",
+      "half_spread_bps": {
+        "median": "22.28",
+        "p90": "42.92"
+      },
+      "impact_beyond_touch_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.01",
+            "p90": "21.56"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.00",
+            "p90": "21.43"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.00",
+            "p90": "21.72"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.00",
+            "p90": "21.52"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "87.14",
+            "p90": "114.19"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.00",
+            "p90": "102.78"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 11,
+            "median": "185.46",
+            "p90": "228.95"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "1.23",
+            "p90": "105.63"
+          }
+        }
+      },
+      "invalid_snapshots": 0,
+      "last": "2026-10-22T05:12:27Z",
+      "median_interval_s": "27.7",
+      "notionals_with_p90": [
+        "250",
+        "500",
+        "1000",
+        "2500"
+      ],
+      "reason": "ok",
+      "samples": 148,
+      "sessions": 3,
+      "slippage_vs_mid_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "32.16",
+            "p90": "53.99"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "32.16",
+            "p90": "51.93"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "32.16",
+            "p90": "72.82"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "32.16",
+            "p90": "53.19"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "108.64",
+            "p90": "149.14"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "32.23",
+            "p90": "124.52"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 11,
+            "median": "206.96",
+            "p90": "261.91"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "33.45",
+            "p90": "129.95"
+          }
+        }
+      },
+      "span_hours": "6.58",
+      "spread_bps": {
+        "max": "108.35",
+        "median": "44.55",
+        "p90": "85.84"
+      },
+      "usable": true,
+      "utc_hours_covered": [
+        4,
+        5,
+        22,
+        23
+      ],
+      "visible_depth_quote": {
+        "BUY": {
+          "median": "38130.06",
+          "p10": "11564.80"
+        },
+        "SELL": {
+          "median": "3587.19",
+          "p10": "3026.79"
+        }
+      }
+    },
+    "SOLUSDT": {
+      "confidence": "low",
+      "confidence_note": "148 snapshots over 1.2 covered hours in 3 session(s), UTC hours 04-05,22-23; NOT representative of other hours, days or volatility regimes.",
+      "covered_hours": "1.19",
+      "first": "2026-10-21T22:37:49Z",
+      "half_spread_bps": {
+        "median": "9.34",
+        "p90": "15.65"
+      },
+      "impact_beyond_touch_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "18.99",
+            "p90": "26.84"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.20",
+            "p90": "4.79"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "32.16",
+            "p90": "42.94"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "2.54",
+            "p90": "17.94"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "3.06",
+            "p90": "4.53"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.77",
+            "p90": "4.11"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 2,
+            "median": "4.64",
+            "p90": "7.85"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "1.79",
+            "p90": "4.39"
+          }
+        }
+      },
+      "invalid_snapshots": 0,
+      "last": "2026-10-22T05:12:26Z",
+      "median_interval_s": "27.9",
+      "notionals_with_p90": [
+        "250",
+        "500",
+        "1000",
+        "2500"
+      ],
+      "reason": "ok",
+      "samples": 148,
+      "sessions": 3,
+      "slippage_vs_mid_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "28.74",
+            "p90": "36.16"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "10.15",
+            "p90": "17.07"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "42.27",
+            "p90": "50.31"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "13.16",
+            "p90": "26.12"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "12.55",
+            "p90": "19.41"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "10.24",
+            "p90": "16.11"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 2,
+            "median": "14.51",
+            "p90": "21.32"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "10.81",
+            "p90": "16.35"
+          }
+        }
+      },
+      "span_hours": "6.58",
+      "spread_bps": {
+        "max": "44.54",
+        "median": "18.67",
+        "p90": "31.29"
+      },
+      "usable": true,
+      "utc_hours_covered": [
+        4,
+        5,
+        22,
+        23
+      ],
+      "visible_depth_quote": {
+        "BUY": {
+          "median": "21638.21",
+          "p10": "12815.38"
+        },
+        "SELL": {
+          "median": "15427.69",
+          "p10": "13125.25"
+        }
+      }
+    },
+    "USOONUSDT": {
+      "confidence": "low",
+      "confidence_note": "148 snapshots over 1.2 covered hours in 3 session(s), UTC hours 04-05,22-23; NOT representative of other hours, days or volatility regimes.",
+      "covered_hours": "1.19",
+      "first": "2026-10-21T22:37:55Z",
+      "half_spread_bps": {
+        "median": "17.47",
+        "p90": "25.41"
+      },
+      "impact_beyond_touch_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "7.86",
+            "p90": "12.43"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "3.81",
+            "p90": "7.86"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "9.87",
+            "p90": "23.32"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "5.28",
+            "p90": "8.30"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "5.30",
+            "p90": "19.99"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.51",
+            "p90": "8.79"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "7.04",
+            "p90": "25.58"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.57",
+            "p90": "16.26"
+          }
+        }
+      },
+      "invalid_snapshots": 0,
+      "last": "2026-10-22T05:12:29Z",
+      "median_interval_s": "27.2",
+      "notionals_with_p90": [
+        "250",
+        "500",
+        "1000",
+        "2500"
+      ],
+      "reason": "ok",
+      "samples": 148,
+      "sessions": 3,
+      "slippage_vs_mid_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "26.64",
+            "p90": "30.28"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "24.53",
+            "p90": "27.60"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "30.32",
+            "p90": "39.72"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "25.72",
+            "p90": "29.32"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "22.42",
+            "p90": "37.96"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "21.99",
+            "p90": "27.31"
+          },
+          "2500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "25.41",
+            "p90": "43.13"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "21.99",
+            "p90": "34.75"
+          }
+        }
+      },
+      "span_hours": "6.58",
+      "spread_bps": {
+        "max": "54.23",
+        "median": "34.94",
+        "p90": "50.81"
+      },
+      "usable": true,
+      "utc_hours_covered": [
+        4,
+        5,
+        22,
+        23
+      ],
+      "visible_depth_quote": {
+        "BUY": {
+          "median": "7933.11",
+          "p10": "7216.52"
+        },
+        "SELL": {
+          "median": "9027.71",
+          "p10": "7621.77"
+        }
+      }
+    },
+    "XAUTUSDT": {
+      "confidence": "low",
+      "confidence_note": "148 snapshots over 1.2 covered hours in 3 session(s), UTC hours 04-05,22-23; NOT representative of other hours, days or volatility regimes.",
+      "covered_hours": "1.19",
+      "first": "2026-10-21T22:37:52Z",
+      "half_spread_bps": {
+        "median": "1.81",
+        "p90": "19.76"
+      },
+      "impact_beyond_touch_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.32",
+            "p90": "2.30"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.01",
+            "p90": "0.47"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 13,
+            "median": "2.17",
+            "p90": "14.84"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.13",
+            "p90": "1.17"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "1.16",
+            "p90": "9.02"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.43",
+            "p90": "0.70"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 23,
+            "median": "2.20",
+            "p90": null
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.45",
+            "p90": "1.20"
+          }
+        }
+      },
+      "invalid_snapshots": 0,
+      "last": "2026-10-22T05:12:28Z",
+      "median_interval_s": "27.4",
+      "notionals_with_p90": [
+        "250",
+        "500",
+        "1000"
+      ],
+      "reason": "ok",
+      "samples": 148,
+      "sessions": 3,
+      "slippage_vs_mid_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "2.50",
+            "p90": "21.57"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "1.81",
+            "p90": "20.18"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 13,
+            "median": "4.21",
+            "p90": "35.13"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "2.14",
+            "p90": "20.84"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "3.20",
+            "p90": "27.77"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "1.97",
+            "p90": "19.88"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 23,
+            "median": "3.99",
+            "p90": null
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "2.33",
+            "p90": "20.04"
+          }
+        }
+      },
+      "span_hours": "6.58",
+      "spread_bps": {
+        "max": "41.57",
+        "median": "3.61",
+        "p90": "39.51"
+      },
+      "usable": true,
+      "utc_hours_covered": [
+        4,
+        5,
+        22,
+        23
+      ],
+      "visible_depth_quote": {
+        "BUY": {
+          "median": "7592.28",
+          "p10": "2709.97"
+        },
+        "SELL": {
+          "median": "7273.64",
+          "p10": "2294.40"
+        }
+      }
+    },
+    "XRPUSDT": {
+      "confidence": "low",
+      "confidence_note": "148 snapshots over 1.2 covered hours in 3 session(s), UTC hours 04-05,22-23; NOT representative of other hours, days or volatility regimes.",
+      "covered_hours": "1.19",
+      "first": "2026-10-21T22:37:47Z",
+      "half_spread_bps": {
+        "median": "8.30",
+        "p90": "16.14"
+      },
+      "impact_beyond_touch_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.07",
+            "p90": "14.47"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.06",
+            "p90": "3.24"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "7.70",
+            "p90": "29.96"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.07",
+            "p90": "7.45"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "7.06",
+            "p90": "24.55"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.00",
+            "p90": "9.98"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 6,
+            "median": "12.35",
+            "p90": "44.15"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "0.66",
+            "p90": "16.97"
+          }
+        }
+      },
+      "invalid_snapshots": 0,
+      "last": "2026-10-22T05:12:25Z",
+      "median_interval_s": "27.9",
+      "notionals_with_p90": [
+        "250",
+        "500",
+        "1000",
+        "2500"
+      ],
+      "reason": "ok",
+      "samples": 148,
+      "sessions": 3,
+      "slippage_vs_mid_bps": {
+        "BUY": {
+          "1000": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "12.31",
+            "p90": "24.60"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "9.86",
+            "p90": "16.19"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "18.45",
+            "p90": "38.52"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "10.78",
+            "p90": "19.91"
+          }
+        },
+        "SELL": {
+          "1000": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 1,
+            "median": "17.29",
+            "p90": "33.68"
+          },
+          "250": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "10.15",
+            "p90": "20.28"
+          },
+          "2500": {
+            "insufficient_depth": true,
+            "insufficient_depth_samples": 6,
+            "median": "24.41",
+            "p90": "57.32"
+          },
+          "500": {
+            "insufficient_depth": false,
+            "insufficient_depth_samples": 0,
+            "median": "11.79",
+            "p90": "22.57"
+          }
+        }
+      },
+      "span_hours": "6.58",
+      "spread_bps": {
+        "max": "59.70",
+        "median": "16.60",
+        "p90": "32.28"
+      },
+      "usable": true,
+      "utc_hours_covered": [
+        4,
+        5,
+        22,
+        23
+      ],
+      "visible_depth_quote": {
+        "BUY": {
+          "median": "8682.74",
+          "p10": "5582.63"
+        },
+        "SELL": {
+          "median": "8447.22",
+          "p10": "6395.80"
+        }
+      }
+    }
+  },
+  "version": "cal-1"
+}
