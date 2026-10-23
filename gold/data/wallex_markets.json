@@ -1,0 +1,23 @@
+{
+ "fetched_at": 1792758963,
+ "markets": {
+  "PAXGUSDT": {
+   "amount_precision": 6,
+   "base_asset": "PAXG",
+   "price_precision": 2,
+   "quote_asset": "USDT",
+   "quote_volume_24h": "1534.60199659",
+   "symbol": "PAXGUSDT",
+   "volume_24h": "0.380132"
+  },
+  "XAUTUSDT": {
+   "amount_precision": 5,
+   "base_asset": "XAUT",
+   "price_precision": 2,
+   "quote_asset": "USDT",
+   "quote_volume_24h": "242511.5611279",
+   "symbol": "XAUTUSDT",
+   "volume_24h": "60.0198717"
+  }
+ }
+}

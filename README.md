@@ -55,6 +55,18 @@ Run it (all offline except `bot --mode shadow`, which makes public GET requests 
 .venv/bin/python -m wallexbot guardian --db /tmp/g_demo.db --mode mock --demo-db --ticks 3 --interval 1   # demo only
 ```
 
+## Gold (wallexio)
+
+A research add-on asks one question: can this repo make about 3 % per month on the Wallex gold tokens (PAXGUSDT / XAUTUSDT)? One long-only trend strategy (daily EMA-50 filter, 20-day breakout, ATR trailing stop, the repo's 3 % risk sizing and risk caps) was written down in [gold/README.md](gold/README.md) **before** any run, then backtested on Binance PAXGUSDT 1h data (committed under `gold/data/`, evaluation 2026-04-01 to 2026-10-23) with the repo's engine and cost model, and replayed through the real bot / OMS / risk engine / ShadowBroker path.
+
+**Result: the target was not met.** The pre-registered strategy returned +0.32 % in total (about +0.05 % per month, 2 trades, max drawdown 1.55 %) while PAXG fell about 14 %; no parameter neighbour or stress variant came close to 3 % per month. Wallex PAXGUSDT itself is thin and wide (about 42 bps half-spread in our snapshots, about 1,500 USDT daily volume); XAUTUSDT is the liquid gold market on Wallex. Full numbers, every variant, buy-and-hold and caveats: [gold/REPORT.md](gold/REPORT.md); shadow replay vs backtest: [gold/SHADOW.md](gold/SHADOW.md). As everywhere in this repo: no profit promise, and a backtest is not live trading.
+
+```bash
+.venv/bin/python -m wallexbot gold-backtest     # offline, deterministic: gold/report.json + gold/REPORT.md
+.venv/bin/python -m wallexbot gold-shadow       # offline replay through the bot path: runs/ (audit DB, journal) + gold/SHADOW.md
+.venv/bin/python -m wallexbot gold-shadow --live --max-ticks 5   # Wallex public book, public GETs only, logs would-be orders
+```
+
 ## Documentation
 
 - [docs/HANDOFF.md](docs/HANDOFF.md): **start here when taking over**: state, quality gates, known limitations, what is not done, recommended next steps.

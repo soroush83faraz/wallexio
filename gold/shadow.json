@@ -1,0 +1,333 @@
+{
+ "approach": "real bot path: bot.loop.Bot -> pipeline.route_to_oms -> OMS (risk engine, kill switch, SQLite audit store) -> ShadowBroker (simulated fills, JSONL journal), in-process guardian; offline replay feed of committed Binance data with a synthetic +/-7.5 bps book; nothing is sent anywhere",
+ "shadow_version": "gold-shadow-1",
+ "windows": {
+  "full_eval_window": {
+   "backtest": {
+    "fills": [
+     {
+      "fee": 0.49999681,
+      "kind": "entry",
+      "price": "4840.99",
+      "qty": "0.051642",
+      "side": "BUY",
+      "ts": 1776196800
+     },
+     {
+      "fee": 0.47570855,
+      "kind": "stop",
+      "price": "4605.83",
+      "qty": "0.051642",
+      "side": "SELL",
+      "ts": 1777366800
+     },
+     {
+      "fee": 0.49343702,
+      "kind": "entry",
+      "price": "4171.70",
+      "qty": "0.059141",
+      "side": "BUY",
+      "ts": 1785913200
+     },
+     {
+      "fee": 0.5280901,
+      "kind": "stop",
+      "price": "4464.67",
+      "qty": "0.059141",
+      "side": "SELL",
+      "ts": 1787932800
+     }
+    ],
+    "final_equity": 1003.1852,
+    "net_return": 0.0031851736,
+    "result_hash": "049ff63a243d9156ca9b6b556a19ca961c5ea0abc1b439ffadbdaee83b8d2266",
+    "round_trips": [
+     {
+      "end_of_data": false,
+      "entry_price": 4840.99,
+      "entry_ts": 1776196800,
+      "entry_utc": "2026-04-14 20:00",
+      "exit_price": 4605.83,
+      "exit_reason": "stop",
+      "exit_ts": 1777366800,
+      "exit_utc": "2026-04-28 09:00",
+      "fees_usdt": 0.97570536,
+      "net_pnl": -13.119838,
+      "qty": "0.051642"
+     },
+     {
+      "end_of_data": false,
+      "entry_price": 4171.7,
+      "entry_ts": 1785913200,
+      "entry_utc": "2026-08-05 07:00",
+      "exit_price": 4464.67,
+      "exit_reason": "stop",
+      "exit_ts": 1787932800,
+      "exit_utc": "2026-08-28 16:00",
+      "fees_usdt": 1.0215271,
+      "net_pnl": 16.305012,
+      "qty": "0.059141"
+     }
+    ],
+    "trades": 2
+   },
+   "files": {
+    "db": "runs/gold_shadow_full.db",
+    "journal": "runs/gold_shadow_full_journal.jsonl"
+   },
+   "paired": [
+    {
+     "backtest": {
+      "end_of_data": false,
+      "entry_price": 4840.99,
+      "entry_ts": 1776196800,
+      "entry_utc": "2026-04-14 20:00",
+      "exit_price": 4605.83,
+      "exit_reason": "stop",
+      "exit_ts": 1777366800,
+      "exit_utc": "2026-04-28 09:00",
+      "fees_usdt": 0.97570536,
+      "net_pnl": -13.119838,
+      "qty": "0.051642"
+     },
+     "entry_delay_s": 2,
+     "entry_price_diff_bps": 0.082627727,
+     "exit_delay_s": 2702,
+     "exit_price_diff_bps": -1.34612,
+     "pnl_diff_usdt": 0.004511,
+     "shadow": {
+      "closed": true,
+      "entry_price": 4841.03,
+      "entry_ts": 1776196802,
+      "entry_utc": "2026-04-14 20:00",
+      "exit_price": 4605.21,
+      "exit_ts": 1777369502,
+      "exit_utc": "2026-04-28 09:45",
+      "fees_usdt": 0.97370516,
+      "net_pnl": -13.115327,
+      "qty": "0.051590"
+     }
+    },
+    {
+     "backtest": {
+      "end_of_data": false,
+      "entry_price": 4171.7,
+      "entry_ts": 1785913200,
+      "entry_utc": "2026-08-05 07:00",
+      "exit_price": 4464.67,
+      "exit_reason": "stop",
+      "exit_ts": 1787932800,
+      "exit_utc": "2026-08-28 16:00",
+      "fees_usdt": 1.0215271,
+      "net_pnl": 16.305012,
+      "qty": "0.059141"
+     },
+     "entry_delay_s": 18002,
+     "entry_price_diff_bps": 30.34734,
+     "exit_delay_s": 2702,
+     "exit_price_diff_bps": 4.1436433,
+     "pnl_diff_usdt": -0.736262,
+     "shadow": {
+      "closed": true,
+      "entry_price": 4184.36,
+      "entry_ts": 1785931202,
+      "entry_utc": "2026-08-05 12:00",
+      "exit_price": 4466.52,
+      "exit_ts": 1787935502,
+      "exit_utc": "2026-08-28 16:45",
+      "fees_usdt": 1.0180804,
+      "net_pnl": 15.56875,
+      "qty": "0.058903"
+     }
+    }
+   ],
+   "shadow": {
+    "base_qty": "1.4E-8",
+    "decisions": {
+     "abstain": 4049,
+     "bar_done": 4933,
+     "cooldown_state": 2,
+     "entry_plan": 4,
+     "entry_rejected": 2,
+     "entry_resolved": 4,
+     "entry_submitted": 4,
+     "exit_decision": 881,
+     "exit_requested": 2,
+     "exit_submitted": 2,
+     "heartbeat": 39466,
+     "position_closed": 2,
+     "position_opened": 2,
+     "position_state": 885,
+     "signal": 4,
+     "startup": 1,
+     "tick": 1
+    },
+    "equity_at_bid": 1002.45330314038,
+    "errors_rows": 0,
+    "fills": [
+     {
+      "fee": "0.000103180",
+      "fee_asset": "PAXG",
+      "liquidity": "taker",
+      "price": "4841.03",
+      "quantity": "0.051590",
+      "side": "BUY",
+      "slippage_bps": "7.483343359359657337294130537",
+      "ts": 1776196802.0,
+      "type": "LIMIT"
+     },
+     {
+      "fee": "0.47420768412",
+      "fee_asset": "USDT",
+      "liquidity": "taker",
+      "price": "4605.21",
+      "quantity": "0.051486",
+      "side": "SELL",
+      "slippage_bps": "7.485906966450117821666167606",
+      "ts": 1777369502.0,
+      "type": "LIMIT"
+     },
+     {
+      "fee": "0.000117806",
+      "fee_asset": "PAXG",
+      "liquidity": "taker",
+      "price": "4184.36",
+      "quantity": "0.058903",
+      "side": "BUY",
+      "slippage_bps": "7.485835507733370324043403496",
+      "ts": 1785931202.0,
+      "type": "LIMIT"
+     },
+     {
+      "fee": "0.52513768944",
+      "fee_asset": "USDT",
+      "liquidity": "taker",
+      "price": "4466.52",
+      "quantity": "0.058786",
+      "side": "SELL",
+      "slippage_bps": "7.494625123325734305471971221",
+      "ts": 1787935502.0,
+      "type": "LIMIT"
+     }
+    ],
+    "guardian": {
+     "failed": 0,
+     "ticks": 19733
+    },
+    "intents_by_state": {
+     "filled": 4,
+     "rejected": 2
+    },
+    "kill_switch_engaged": false,
+    "mark_bid": "4036.71",
+    "net_return_at_bid": 0.0024533031,
+    "open_positions": [],
+    "risk_rejections": [
+     {
+      "client_id": "wb_366def925eab50eca89fee34acb3465b",
+      "reasons": [
+       "above_max_position_pct"
+      ],
+      "ts": 1785913200,
+      "utc": "2026-08-05 07:00"
+     },
+     {
+      "client_id": "wb_0e7fed748b3056a6bd06435fea12872c",
+      "reasons": [
+       "above_max_position_pct"
+      ],
+      "ts": 1785916800,
+      "utc": "2026-08-05 08:00"
+     }
+    ],
+    "round_trips": [
+     {
+      "closed": true,
+      "entry_price": 4841.03,
+      "entry_ts": 1776196802,
+      "entry_utc": "2026-04-14 20:00",
+      "exit_price": 4605.21,
+      "exit_ts": 1777369502,
+      "exit_utc": "2026-04-28 09:45",
+      "fees_usdt": 0.97370516,
+      "net_pnl": -13.115327,
+      "qty": "0.051590"
+     },
+     {
+      "closed": true,
+      "entry_price": 4184.36,
+      "entry_ts": 1785931202,
+      "entry_utc": "2026-08-05 12:00",
+      "exit_price": 4466.52,
+      "exit_ts": 1787935502,
+      "exit_utc": "2026-08-28 16:45",
+      "fees_usdt": 1.0180804,
+      "net_pnl": 15.56875,
+      "qty": "0.058903"
+     }
+    ],
+    "ticks": 19733,
+    "ticks_with_errors": 0,
+    "usdt": "1002.45324662644"
+   },
+   "window": {
+    "decision_bars": "Binance PAXGUSDT 1h",
+    "end_ts": 1792756800,
+    "end_utc": "2026-10-23 12:00",
+    "quote_candles": "Binance PAXGUSDT 15m",
+    "start_ts": 1775001600,
+    "start_utc": "2026-04-01 00:00"
+   }
+  },
+  "last_30_days": {
+   "backtest": {
+    "fills": [],
+    "final_equity": 1000.0,
+    "net_return": 0.0,
+    "result_hash": "2f94323e6fa25fa89dd4df99a8fb099ae4a904c46980d16283f489d3fb0eb6b7",
+    "round_trips": [],
+    "trades": 0
+   },
+   "files": {
+    "db": "runs/gold_shadow_30d.db",
+    "journal": "runs/gold_shadow_30d_journal.jsonl"
+   },
+   "paired": [],
+   "shadow": {
+    "base_qty": "0",
+    "decisions": {
+     "abstain": 721,
+     "bar_done": 721,
+     "heartbeat": 17282,
+     "startup": 1,
+     "tick": 1
+    },
+    "equity_at_bid": 1000.0,
+    "errors_rows": 0,
+    "fills": [],
+    "guardian": {
+     "failed": 0,
+     "ticks": 8641
+    },
+    "intents_by_state": {},
+    "kill_switch_engaged": false,
+    "mark_bid": "4033.08",
+    "net_return_at_bid": 0.0,
+    "open_positions": [],
+    "risk_rejections": [],
+    "round_trips": [],
+    "ticks": 8641,
+    "ticks_with_errors": 0,
+    "usdt": "1000"
+   },
+   "window": {
+    "decision_bars": "Binance PAXGUSDT 1h",
+    "end_ts": 1792713600,
+    "end_utc": "2026-10-23 00:00",
+    "quote_candles": "Binance PAXGUSDT 5m",
+    "start_ts": 1790121600,
+    "start_utc": "2026-09-23 00:00"
+   }
+  }
+ }
+}

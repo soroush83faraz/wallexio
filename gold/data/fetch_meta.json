@@ -1,0 +1,31 @@
+{
+ "binance": {
+  "15m": [
+   1775001600,
+   1792755900,
+   19728
+  ],
+  "15m_fetched_at_utc": "2026-10-23T12:45:40Z",
+  "1h": [
+   1769904000,
+   1792753200,
+   6348
+  ],
+  "5m": [
+   1790035200,
+   1792756500,
+   9072
+  ],
+  "source": "https://api.binance.com/api/v3/klines",
+  "symbol": "PAXGUSDT"
+ },
+ "fetched_at_utc": "2026-10-23T12:36:03Z",
+ "wallex": {
+  "1h_bars": {
+   "PAXGUSDT": 6318,
+   "XAUTUSDT": 6343
+  },
+  "depth_snapshots": 5,
+  "source": "api.wallex.ir /v1/udf/history (resolution 60), /v1/depth, markets"
+ }
+}

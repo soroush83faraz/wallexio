@@ -9,6 +9,9 @@
     history    resumable 1m candle downloader (public GETs only): `--out DIR --symbols A,B | --top-n 12
                --days 45 --max-requests 1500`; re-run the same command to resume
     calibrate-costs  spread/slippage calibration from recorded order books -> reports/cost_calibration.json
+    gold-fetch / gold-backtest / gold-shadow   gold (PAXG/XAUT) research add-on, see gold/README.md:
+               download inputs (public GETs), pre-registered backtest -> gold/REPORT.md, shadow replay through
+               the bot/OMS/ShadowBroker path -> gold/SHADOW.md (`gold-shadow --live`: Wallex public book, no orders)
     doctor     read-only account preflight; needs WALLEX_API_KEY_READ in the environment (exit 2 without it)
     guardian   standalone guardian DEMO on its own mock broker and a NEW database (--demo-db); it refuses a
                bot's database (the bot runs its guardian in-process)
@@ -226,6 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("doctor", help=f"read-only preflight (needs {READ_KEY_ENV})")
     r.set_defaults(func=_doctor)
+
+    from wallexbot.gold.cli import add_parsers as add_gold_parsers
+    add_gold_parsers(sub)   # gold-fetch, gold-backtest, gold-shadow (gold/README.md)
 
     sub.add_parser("guardian", add_help=False,
                    help="standalone guardian DEMO (own mock broker, new DB only); all further arguments go to "

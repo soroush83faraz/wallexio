@@ -1,0 +1,1322 @@
+{
+ "buy_and_hold": {
+  "100pct": {
+   "costs": 5.4457874,
+   "days": 205.5,
+   "end_ts": 1792756800,
+   "entry_price": "4691.76",
+   "exit_price": "4035.77",
+   "final_equity": 856.82491,
+   "fraction": "1",
+   "geo_avg_monthly_return": -0.022626963,
+   "max_drawdown": 0.18472882,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 982.36612,
+     "month": "2026-04",
+     "return": -0.017633875,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 964.67772,
+     "month": "2026-05",
+     "return": -0.018005917,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 851.88651,
+     "month": "2026-06",
+     "return": -0.11692113,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 861.16017,
+     "month": "2026-07",
+     "return": 0.010886022,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 946.84688,
+     "month": "2026-08",
+     "return": 0.099501475,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 886.15354,
+     "month": "2026-09",
+     "return": -0.064100474,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 856.82491,
+     "month": "2026-10",
+     "return": -0.033096562,
+     "trades_closed": 0
+    }
+   ],
+   "paxg_move": -0.13820196,
+   "qty": "0.212601",
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": -0.017712316,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 1,
+    "geo_avg_monthly_return": -0.022626963,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_return": -0.14317509
+  },
+  "25pct": {
+   "costs": 1.2976796,
+   "days": 205.5,
+   "end_ts": 1792756800,
+   "entry_price": "4691.25",
+   "exit_price": "4036.46",
+   "final_equity": 964.27016,
+   "fraction": "0.25",
+   "geo_avg_monthly_return": -0.0053744656,
+   "max_drawdown": 0.047358945,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 995.61871,
+     "month": "2026-04",
+     "return": -0.0043812874,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 991.19663,
+     "month": "2026-05",
+     "return": -0.0044415397,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 962.99896,
+     "month": "2026-06",
+     "return": -0.028448109,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 965.31737,
+     "month": "2026-07",
+     "return": 0.0024074823,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 986.73894,
+     "month": "2026-08",
+     "return": 0.022191226,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 971.56568,
+     "month": "2026-09",
+     "return": -0.01537718,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 964.27016,
+     "month": "2026-10",
+     "return": -0.0075090386,
+     "trades_closed": 0
+    }
+   ],
+   "paxg_move": -0.13820196,
+   "qty": "0.053150",
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": -0.0046749013,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": -0.0053744656,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_return": -0.035729844
+  }
+ },
+ "data": {
+  "bars": "Binance PAXGUSDT 1h",
+  "fetched_at_utc": "2026-10-23T12:36:03Z",
+  "first_ts": 1769904000,
+  "first_utc": "2026-02-01 00:00",
+  "last_close_utc": "2026-10-23 12:00",
+  "last_ts": 1792753200,
+  "n_bars": 6348,
+  "sha256": {
+   "binance_PAXGUSDT_1h.csv": "2370d68e1d46a1e45327067396d73e98adac623d874563ddd3d453b956ee5119",
+   "binance_PAXGUSDT_5m.csv": "bd54f2b3f53552a51000d6c9947ea3790a40d64a73376b602399ae5fec694a51",
+   "wallex_PAXGUSDT_1h.csv": "24bf6aa2c623c17a95f8acd84d872c0aaa32fa941682926de9a521defd84f804",
+   "wallex_XAUTUSDT_1h.csv": "a620c71f2b07ebf5f7e2e858e9c040a63e96a81e98fd2763cbfff4037711ca65"
+  }
+ },
+ "engine_version": "bt-0.2",
+ "initial_equity": 1000.0,
+ "report_version": "gold-report-1",
+ "risk_config": {
+  "consecutive_loss_cooldown": "3",
+  "daily_loss_hard_pct": "6",
+  "daily_loss_soft_pct": "4",
+  "drawdown_hard_pct": "12",
+  "drawdown_soft_pct": "8",
+  "max_exposure_pct": "60",
+  "max_open_positions": "3",
+  "max_order_value": "1000",
+  "max_position_pct": "25",
+  "min_notional": "5",
+  "risk_per_trade_pct": "3.0"
+ },
+ "strategy_version": "g1-0.1",
+ "symbol_rules": {
+  "amount_precision": 6,
+  "price_precision": 2
+ },
+ "symbol_traded": "PAXGUSDT",
+ "variants": {
+  "S1": {
+   "avg_loss": -14.095543,
+   "avg_position_pct_when_in": 0.25647626,
+   "avg_win": 15.268237,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 0.46243404,
+   "expectancy_usdt": 0.58634703,
+   "exposure_time": 0.17964315,
+   "fees": 3.9924268,
+   "final_equity": 1001.1727,
+   "geo_avg_monthly_return": 0.00017360613,
+   "gross_pnl": 5.9482152,
+   "impact_cost": 0.034500241,
+   "inputs_hash": "547bb3e94266e7c51f965d5521307e1337ce1d26041481af997b3a420a285e8a",
+   "label": "V0, fees x2 (0.4 % per side)",
+   "losses": 1,
+   "max_drawdown": 0.0164434,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 985.90446,
+     "month": "2026-04",
+     "return": -0.014095543,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 985.90446,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 985.90446,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 985.90446,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 1001.1727,
+     "month": "2026-08",
+     "return": 0.015486529,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 1001.1727,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 1001.1727,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": 1.1726941,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 20,
+    "cooldown_bars": 24,
+    "ema_days": 50,
+    "half_spread_bps": "7.5",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "2.0",
+    "taker_rate": "0.004",
+    "trail_atr_mult": "3.0"
+   },
+   "profit_factor": 1.0831961,
+   "result_hash": "e204b9ec342fd6d66e9bba9f6069b558bdba2291f192ab499f3b068290bb22b0",
+   "spread_cost": 0.74859414,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": 0.000231831,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": 0.00017360613,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 4.7755211,
+   "total_return": 0.0011726941,
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "S2": {
+   "avg_loss": -15.464647,
+   "avg_position_pct_when_in": 0.25540514,
+   "avg_win": 13.666882,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 0.22604162,
+   "expectancy_usdt": -0.89888223,
+   "exposure_time": 0.17964315,
+   "fees": 1.9848839,
+   "final_equity": 998.20224,
+   "geo_avg_monthly_return": -0.00026647885,
+   "gross_pnl": 5.8949425,
+   "impact_cost": 4.9634659,
+   "inputs_hash": "8c8503a326b81388fd638db16ba4f47748a41ba8c2ba99b1d2a44912aa7ab8eb",
+   "label": "V0, impact always at the 50 bps cap",
+   "losses": 1,
+   "max_drawdown": 0.018416818,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 984.53535,
+     "month": "2026-04",
+     "return": -0.015464647,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 984.53535,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 984.53535,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 984.53535,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 998.20224,
+     "month": "2026-08",
+     "return": 0.013881556,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 998.20224,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 998.20224,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": -1.7977645,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 20,
+    "cooldown_bars": 24,
+    "ema_days": 50,
+    "half_spread_bps": "7.5",
+    "impact": "cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "2.0",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "3.0"
+   },
+   "profit_factor": 0.88375005,
+   "result_hash": "b0b8a40f868efa016a3f802b9083c60838e973e2f597bc53b401a556521164b0",
+   "spread_cost": 0.74435716,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": -0.0002638485,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": -0.00026647885,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 7.692707,
+   "total_return": -0.0017977645,
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "S3": {
+   "avg_loss": -32.117744,
+   "avg_position_pct_when_in": 0.85581571,
+   "avg_win": 63.646156,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:cash": 1
+   },
+   "expectancy_r": 0.56402733,
+   "expectancy_usdt": 15.764206,
+   "exposure_time": 0.17964315,
+   "fees": 6.3832364,
+   "final_equity": 1031.5284,
+   "geo_avg_monthly_return": 0.004608292,
+   "gross_pnl": 40.657656,
+   "impact_cost": 0.35220015,
+   "inputs_hash": "841d98c7378229d2f7611f7d1f31fd4059a56ccb9f16c87a83a72979734419f9",
+   "label": "V0, position/exposure caps 100 %, no max order value",
+   "losses": 1,
+   "max_drawdown": 0.047660204,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 967.88226,
+     "month": "2026-04",
+     "return": -0.032117744,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 967.88226,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 967.88226,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 967.88226,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 1031.5284,
+     "month": "2026-08",
+     "return": 0.06575816,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 1031.5284,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 1031.5284,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": 31.528413,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 20,
+    "cooldown_bars": 24,
+    "ema_days": 50,
+    "half_spread_bps": "7.5",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "100/100, no max order",
+    "stop_atr_mult": "2.0",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "3.0"
+   },
+   "profit_factor": 1.9816509,
+   "result_hash": "f4be750930f181ebd9e43c02b4d9e5d00dd9ea7fdc51a912d310f71569607423",
+   "spread_cost": 2.3938067,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": 0.005606736,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 1,
+    "geo_avg_monthly_return": 0.004608292,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 9.1292432,
+   "total_return": 0.031528413,
+   "trade_list": [
+    {
+     "bars_held": 325,
+     "costs": 3.379812,
+     "end_of_data": false,
+     "entry_price": "4841.03",
+     "entry_ts": 1776196800,
+     "entry_utc": "2026-04-14 20:00",
+     "exit_price": 4605.41,
+     "exit_reason": "stop",
+     "exit_ts": 1777366800,
+     "exit_utc": "2026-04-28 09:00",
+     "initial_stop": "4603.30",
+     "net_pnl": -32.117744,
+     "notional": 610.9041,
+     "qty": "0.126193",
+     "r_multiple": -1.0705964
+    },
+    {
+     "bars_held": 561,
+     "costs": 5.7494313,
+     "end_of_data": false,
+     "entry_price": "4172.08",
+     "entry_ts": 1785913200,
+     "entry_utc": "2026-08-05 07:00",
+     "exit_price": 4464.25,
+     "exit_reason": "stop",
+     "exit_ts": 1787932800,
+     "exit_utc": "2026-08-28 16:00",
+     "initial_stop": "4047.05",
+     "net_pnl": 63.646156,
+     "notional": 965.94917,
+     "qty": "0.231527",
+     "r_multiple": 2.198651
+    }
+   ],
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "S4": {
+   "avg_loss": -14.754997,
+   "avg_position_pct_when_in": 0.25569423,
+   "avg_win": 14.465187,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 0.3204618,
+   "expectancy_usdt": -0.14490534,
+   "exposure_time": 0.17964315,
+   "fees": 1.9886292,
+   "final_equity": 999.71019,
+   "geo_avg_monthly_return": -4.2930421e-05,
+   "gross_pnl": 5.9162165,
+   "impact_cost": 0.034151026,
+   "inputs_hash": "856631f54e5746ec84796daf991f3734813f61de6d2e9fea97132427267f8f55",
+   "label": "V0, half-spread 42.07 bps (observed Wallex PAXGUSDT)",
+   "losses": 1,
+   "max_drawdown": 0.017342323,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 985.245,
+     "month": "2026-04",
+     "return": -0.014754997,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 985.245,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 985.245,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 985.245,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 999.71019,
+     "month": "2026-08",
+     "return": 0.014681817,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 999.71019,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 999.71019,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": -0.28981068,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 20,
+    "cooldown_bars": 24,
+    "ema_days": 50,
+    "half_spread_bps": "42.07",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "2.0",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "3.0"
+   },
+   "profit_factor": 0.98035847,
+   "result_hash": "cc33f1c57184c1a466a4e729dacad25680413dc781f47021b71a8ac865eb2870",
+   "spread_cost": 4.1832469,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": -1.2196667e-05,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": -4.2930421e-05,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 6.2060272,
+   "total_return": -0.00028981068,
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "V0": {
+   "avg_loss": -13.119838,
+   "avg_position_pct_when_in": 0.25635054,
+   "avg_win": 16.305012,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 0.57146329,
+   "expectancy_usdt": 1.5925868,
+   "exposure_time": 0.17964315,
+   "fees": 1.9972325,
+   "final_equity": 1003.1852,
+   "geo_avg_monthly_return": 0.00047113114,
+   "gross_pnl": 5.9658993,
+   "impact_cost": 0.034516911,
+   "inputs_hash": "ec74b3a3c263f6543a4865b38c5600da4a8f476d09c4d3e3100e359d355d3426",
+   "label": "G1 as pre-registered (headline)",
+   "losses": 1,
+   "max_drawdown": 0.015468864,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 986.88016,
+     "month": "2026-04",
+     "return": -0.013119838,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 986.88016,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 986.88016,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 986.88016,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 1003.1852,
+     "month": "2026-08",
+     "return": 0.016521775,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 1003.1852,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 1003.1852,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": 3.1851736,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 20,
+    "cooldown_bars": 24,
+    "ema_days": 50,
+    "half_spread_bps": "7.5",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "2.0",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "3.0"
+   },
+   "profit_factor": 1.2427754,
+   "result_hash": "6e6d0c5219851d167defc780fda700f70d09df457b90bb0450786028e7fe0932",
+   "spread_cost": 0.74897631,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": 0.0005669895,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": 0.00047113114,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 2.7807257,
+   "total_return": 0.0031851736,
+   "trade_list": [
+    {
+     "bars_held": 325,
+     "costs": 1.3594054,
+     "end_of_data": false,
+     "entry_price": "4840.99",
+     "entry_ts": 1776196800,
+     "entry_utc": "2026-04-14 20:00",
+     "exit_price": 4605.83,
+     "exit_reason": "stop",
+     "exit_ts": 1777366800,
+     "exit_utc": "2026-04-28 09:00",
+     "initial_stop": "4603.30",
+     "net_pnl": -13.119838,
+     "notional": 249.99841,
+     "qty": "0.051642",
+     "r_multiple": -1.0688445
+    },
+    {
+     "bars_held": 561,
+     "costs": 1.4213203,
+     "end_of_data": false,
+     "entry_price": "4171.70",
+     "entry_ts": 1785913200,
+     "entry_utc": "2026-08-05 07:00",
+     "exit_price": 4464.67,
+     "exit_reason": "stop",
+     "exit_ts": 1787932800,
+     "exit_utc": "2026-08-28 16:00",
+     "initial_stop": "4047.05",
+     "net_pnl": 16.305012,
+     "notional": 246.71851,
+     "qty": "0.059141",
+     "r_multiple": 2.211771
+    }
+   ],
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "V1": {
+   "avg_loss": -10.454256,
+   "avg_position_pct_when_in": 0.25647841,
+   "avg_win": 18.960842,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 1.0615491,
+   "expectancy_usdt": 4.2532934,
+   "exposure_time": 0.17802109,
+   "fees": 2.0105719,
+   "final_equity": 1008.5066,
+   "geo_avg_monthly_return": 0.0012554062,
+   "gross_pnl": 11.352133,
+   "impact_cost": 0.080957511,
+   "inputs_hash": "67e942211f33995f7c340d9f2bc7f78e12c3ca46be9e11fa5afb36c1bff6f2e6",
+   "label": "stops x0.8 (1.6 / 2.4 ATR)",
+   "losses": 1,
+   "max_drawdown": 0.012809634,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 989.54574,
+     "month": "2026-04",
+     "return": -0.010454256,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 989.54574,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 989.54574,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 989.54574,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 1008.5066,
+     "month": "2026-08",
+     "return": 0.019161158,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 1008.5066,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 1008.5066,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": 8.5065868,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 20,
+    "cooldown_bars": 24,
+    "ema_days": 50,
+    "half_spread_bps": "7.5",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "1.6",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "2.4"
+   },
+   "profit_factor": 1.8136961,
+   "result_hash": "7053f946eda323028c155503b31c5a117734cc6c8577b7c273161aabefa7a57a",
+   "spread_cost": 0.75401641,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": 0.0014511503,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": 0.0012554062,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 2.8455458,
+   "total_return": 0.0085065868,
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "V2": {
+   "avg_loss": -15.831805,
+   "avg_position_pct_when_in": 0.25672183,
+   "avg_win": 13.652573,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 0.2386587,
+   "expectancy_usdt": -1.0896161,
+   "exposure_time": 0.1918086,
+   "fees": 1.9837568,
+   "final_equity": 997.82077,
+   "geo_avg_monthly_return": -0.00032307559,
+   "gross_pnl": 0.5925173,
+   "impact_cost": 0.044065711,
+   "inputs_hash": "0c04efae1ed8f18c383961e846ecd64ed430766fed680be717e41b3d0dde8984",
+   "label": "stops x1.2 (2.4 / 3.6 ATR)",
+   "losses": 1,
+   "max_drawdown": 0.018174362,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 984.16819,
+     "month": "2026-04",
+     "return": -0.015831805,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 984.16819,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 984.16819,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 984.16819,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 997.82077,
+     "month": "2026-08",
+     "return": 0.013872195,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 997.82077,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 997.82077,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": -2.1792323,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 20,
+    "cooldown_bars": 24,
+    "ema_days": 50,
+    "half_spread_bps": "7.5",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "2.4",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "3.6"
+   },
+   "profit_factor": 0.86235099,
+   "result_hash": "a1a2d7a04f6a56f2422b229e421657f39e87a54588f674e28427e56d41780988",
+   "spread_cost": 0.74392709,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": -0.00032660167,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": -0.00032307559,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 2.7717496,
+   "total_return": -0.0021792323,
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "V3": {
+   "avg_loss": -11.168402,
+   "avg_position_pct_when_in": 0.25543539,
+   "avg_win": 16.337268,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 0.69013039,
+   "expectancy_usdt": 2.5844333,
+   "exposure_time": 0.21309813,
+   "fees": 2.0031542,
+   "final_equity": 1005.1689,
+   "geo_avg_monthly_return": 0.00076390315,
+   "gross_pnl": 7.9568519,
+   "impact_cost": 0.033632203,
+   "inputs_hash": "d77ca3df0e30fe8afa0a7dc952923f5e609ba41bf82234e6ec0778704f57761a",
+   "label": "lookbacks x0.8 (EMA 40d, breakout 16d)",
+   "losses": 1,
+   "max_drawdown": 0.015552906,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 988.8316,
+     "month": "2026-04",
+     "return": -0.011168402,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 988.8316,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 988.8316,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 988.8316,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 1005.1689,
+     "month": "2026-08",
+     "return": 0.01652179,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 1005.1689,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 1005.1689,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": 5.1688665,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 16,
+    "cooldown_bars": 24,
+    "ema_days": 40,
+    "half_spread_bps": "7.5",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "2.0",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "3.0"
+   },
+   "profit_factor": 1.4628117,
+   "result_hash": "9da3908c03f0554155baffe6b348846a29385a711a67fa2d784755290dda3013",
+   "spread_cost": 0.75119896,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": 0.00089223133,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": 0.00076390315,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 2.7879854,
+   "total_return": 0.0051688665,
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  },
+  "V4": {
+   "avg_loss": -12.815459,
+   "avg_position_pct_when_in": 0.25675675,
+   "avg_win": 16.309974,
+   "days": 205.5,
+   "end_of_data_trades": 0,
+   "end_ts": 1792756800,
+   "events": {
+    "entry_sized:capped_by:max_position": 2
+   },
+   "expectancy_r": 0.55397132,
+   "expectancy_usdt": 1.7472576,
+   "exposure_time": 0.16545012,
+   "fees": 1.9981588,
+   "final_equity": 1003.4945,
+   "geo_avg_monthly_return": 0.00051681911,
+   "gross_pnl": 6.3102594,
+   "impact_cost": 0.068234834,
+   "inputs_hash": "1e42fc801248393d9a378064a4a96e20d209026b8ea7c9e7e272bc9146ec51a4",
+   "label": "lookbacks x1.2 (EMA 60d, breakout 24d)",
+   "losses": 1,
+   "max_drawdown": 0.014562625,
+   "monthly": [
+    {
+     "complete": true,
+     "end_equity": 987.18454,
+     "month": "2026-04",
+     "return": -0.012815459,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 987.18454,
+     "month": "2026-05",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 987.18454,
+     "month": "2026-06",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 987.18454,
+     "month": "2026-07",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": true,
+     "end_equity": 1003.4945,
+     "month": "2026-08",
+     "return": 0.016521707,
+     "trades_closed": 1
+    },
+    {
+     "complete": true,
+     "end_equity": 1003.4945,
+     "month": "2026-09",
+     "return": 0.0,
+     "trades_closed": 0
+    },
+    {
+     "complete": false,
+     "end_equity": 1003.4945,
+     "month": "2026-10",
+     "return": 0.0,
+     "trades_closed": 0
+    }
+   ],
+   "net_pnl": 3.4945152,
+   "params": {
+    "atr_days": 14,
+    "breakout_days": 24,
+    "cooldown_bars": 24,
+    "ema_days": 60,
+    "half_spread_bps": "7.5",
+    "impact": "0.2 x notional / prev bar notional, cap 50 bps",
+    "position_caps": "repo: 25 % position, 60 % exposure, 1000 USDT max order",
+    "stop_atr_mult": "2.0",
+    "taker_rate": "0.002",
+    "trail_atr_mult": "3.0"
+   },
+   "profit_factor": 1.2726797,
+   "result_hash": "1c6fddeae1611fbc9b13af5c40c5387c0344865c139f82db6f79f6456ccf8d96",
+   "spread_cost": 0.74935063,
+   "start_equity": 1000.0,
+   "start_ts": 1775001600,
+   "target": {
+    "arith_mean_complete_months": 0.000617708,
+    "complete_months": 6,
+    "complete_months_at_or_above_target": 0,
+    "geo_avg_monthly_return": 0.00051681911,
+    "met": false,
+    "target_monthly": 0.03
+   },
+   "total_costs": 2.8157442,
+   "total_return": 0.0034945152,
+   "trades": 2,
+   "win_rate": 0.5,
+   "wins": 1
+  }
+ },
+ "wallex": {
+  "basis_vs_binance_paxg": {
+   "PAXGUSDT": {
+    "all_hours": {
+     "mean_abs_bps": 325.07939157747245,
+     "mean_bps": -323.77546008461223,
+     "median_bps": -338.3034373404156,
+     "n": 6318,
+     "p05_bps": -557.0955538517277,
+     "p95_bps": -57.85299549176214
+    },
+    "common_hours": 6318,
+    "first_ts": 1769904000,
+    "last_ts": 1792753200,
+    "median_hourly_notional_usdt": 0.0,
+    "traded_hours": {
+     "mean_abs_bps": 326.4293991089012,
+     "mean_bps": -324.7399741632953,
+     "median_bps": -337.78781555324355,
+     "n": 2349,
+     "p05_bps": -554.0182630351425,
+     "p95_bps": -56.96835883427543
+    },
+    "zero_volume_hour_share": 0.6282051282051282
+   },
+   "XAUTUSDT": {
+    "all_hours": {
+     "mean_abs_bps": 43.31063358739218,
+     "mean_bps": -34.22032192231579,
+     "median_bps": -20.56368694810693,
+     "n": 6343,
+     "p05_bps": -140.13772322075314,
+     "p95_bps": 25.664040993913893
+    },
+    "common_hours": 6343,
+    "first_ts": 1769904000,
+    "last_ts": 1792753200,
+    "median_hourly_notional_usdt": 2678.396,
+    "traded_hours": {
+     "mean_abs_bps": 43.291995741291274,
+     "mean_bps": -34.232501208520596,
+     "median_bps": -20.59022726617649,
+     "n": 6100,
+     "p05_bps": -139.96116359133592,
+     "p95_bps": 25.5652449931154
+    },
+    "zero_volume_hour_share": 0.03830994797414473
+   }
+  },
+  "depth": {
+   "PAXGUSDT": {
+    "best_ask_qty_usdt": 99.99806427,
+    "best_bid_qty_usdt": 133.310151,
+    "max_half_spread_bps": 93.57301157350406,
+    "median_half_spread_bps": 42.06688374614325,
+    "snapshots": 5,
+    "vwap_cost_vs_mid_bps": {
+     "1000": {
+      "BUY": 51.27855735656704,
+      "SELL": 42.560300655182026
+     },
+     "250": {
+      "BUY": 44.587661486584715,
+      "SELL": 42.33262153541841
+     }
+    }
+   },
+   "XAUTUSDT": {
+    "best_ask_qty_usdt": 228.5662764,
+    "best_bid_qty_usdt": 129.985104,
+    "max_half_spread_bps": 0.16141749393132307,
+    "median_half_spread_bps": 0.14900057861891364,
+    "snapshots": 5,
+    "vwap_cost_vs_mid_bps": {
+     "1000": {
+      "BUY": 0.25122759398879424,
+      "SELL": 0.17060606346036986
+     },
+     "250": {
+      "BUY": 0.15325874224125474,
+      "SELL": 0.1609222161714981
+     }
+    }
+   }
+  },
+  "markets": {
+   "PAXGUSDT": {
+    "amount_precision": 6,
+    "base_asset": "PAXG",
+    "price_precision": 2,
+    "quote_asset": "USDT",
+    "quote_volume_24h": "1534.60199659",
+    "symbol": "PAXGUSDT",
+    "volume_24h": "0.380132"
+   },
+   "XAUTUSDT": {
+    "amount_precision": 5,
+    "base_asset": "XAUT",
+    "price_precision": 2,
+    "quote_asset": "USDT",
+    "quote_volume_24h": "242511.5611279",
+    "symbol": "XAUTUSDT",
+    "volume_24h": "60.0198717"
+   }
+  }
+ },
+ "windows": {
+  "eval_end_utc": "2026-10-23 12:00",
+  "eval_start_ts": 1775001600,
+  "eval_start_utc": "2026-04-01 00:00",
+  "warmup_start_utc": "2026-02-01 00:00"
+ }
+}
