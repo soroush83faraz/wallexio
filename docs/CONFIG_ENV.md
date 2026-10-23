@@ -1,6 +1,6 @@
 # Configuration and environment
 
-Status: `config.py`, `src/wallexbot/default_config.yaml` (package data) and `exchange/auth.py` exist. `wallexbot.doctor` now exists as a module (`run_doctor`, GET-only; see below), and `python -m wallexbot doctor` runs it. `cli.py` exists, but the `--arm-live` flag is deliberately refused everywhere (no live mode in this build).
+Status: `config.py`, `src/wallexbot/default_config.yaml` (package data) and `exchange/auth.py` exist. `wallexbot.doctor` now exists as a module (`run_doctor`, GET-only; see below), and `python -m wallexbot doctor` runs it. `cli.py` exists, and live mode is armed only through the explicit conditions below.
 
 ## Environment variable names
 

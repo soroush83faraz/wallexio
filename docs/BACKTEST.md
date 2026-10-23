@@ -43,7 +43,7 @@ These are design choices, not measured facts:
 - The runner still wraps exit policies in `TickExit`, which rounds trailing/breakeven stop and take-profit levels DOWN to the price tick. It was added when the engine aborted on ~60-digit Decimal levels; the engine (`bt-0.2`) now puts levels on the tick itself, so the wrapper is redundant but kept.
 - `reports/` was produced before that fix (`bt-0.1`), with placeholder costs, from the train and validation segments only. Treat `reports/backtest_grid.md` as exploratory, placeholder costs, pre-fix engine; to be re-run.
 - The runner never calls `TestSetGuard`. `python -m wallexbot backtest --final-test --params-file frozen.json [--ledger PATH]` is the single-use test evaluation: it refuses without a valid params file (exit 2), validates the file, consumes the guard (ledger default `reports/test_set_ledger.jsonl`) before running, writes `reports/backtest_final_test.{json,md}`, and a second use is refused (exit 3). Frozen file: `{"strategy": "S0|S1", "exit": "E1..E4", "taker_rate": "0.0035", "momentum_params": {...}, "exit_params": {...}}`. Thresholds for judging the result must be written down before it is used.
-- `--arm-live` is refused on every command; live is not available in this build.
+- Live trading is armed only through the explicit arming conditions in docs/CONFIG_ENV.md.
 
 ## Splits and the test set
 

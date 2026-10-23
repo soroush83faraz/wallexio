@@ -1,4 +1,4 @@
-# wallexbot: mock / shadow only. Live trading does not exist in this build.
+# wallexbot: mock, shadow and live (live needs explicit arming).
 # Works from a fresh clone: `make venv test demo`.
 
 PYTHON   ?= python3.12

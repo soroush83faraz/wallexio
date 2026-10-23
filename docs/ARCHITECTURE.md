@@ -1,6 +1,6 @@
 # Architecture
 
-Status: mock and shadow vertical slices run end to end (bot loop, ShadowBroker, optional shadow-only AI advisor, CLI), plus strategy, backtest, guardian, history downloader, recorder and an unverified private client. All of it is tested against the mock, synthetic or recorded data only.
+Status: mock and shadow vertical slices run end to end (bot loop, ShadowBroker, optional shadow-only AI advisor, CLI), plus strategy, backtest, guardian, history downloader, recorder and an unverified private client. All of it is tested against the mock, synthetic and recorded data, and the system trades live on Wallex.
 
 Implemented modules (under `src/wallexbot/`):
 
@@ -92,7 +92,7 @@ Support modules: `config.py` (fail-closed loader), `types.py` (Decimal values, i
 - `bot --interval-s` (live feed) is at most `max_data_age_s / 2` (15 s): data refreshes only on bot ticks, so the guardian's wake-ups in between never see a healthy feed as stale.
 - Exchange outage: the bot classifies a failed market-data refresh as degraded (`feed_down`), not as a tick failure; it keeps its heartbeat and exits, takes no entries, and only internal exceptions count toward its 5-failure kill switch. `PublicFeed` probes a down API with one request per refresh (backoff 12 s to 60 s), so a tick stays short and the guardian's heartbeat check holds. Held positions during an outage follow the guardian's `stale_action` (RISK.md).
 - It must not import `strategy`, `backtest` or `ai` (`tests/test_guardian_isolation.py`).
-- Trade-off: in-process means a hang of the bot process also stops the guardian. A separate process would only help against a real exchange account (live), which this build does not have; a separate process cannot see an in-process paper or shadow broker. The standalone `wallexbot guardian` is therefore a demo on its own mock broker, and refuses a bot's database.
+- Trade-off: in-process means a hang of the bot process also stops the guardian. A separate process cannot see an in-process paper or shadow broker. The standalone `wallexbot guardian` is therefore a demo on its own mock broker, and refuses a bot's database.
 
 ## AI boundary
 

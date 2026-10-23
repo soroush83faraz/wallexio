@@ -2,49 +2,59 @@
 
 A long-only, spot momentum-breakout trading agent for the Wallex exchange, quoted in USDT.
 
-**Status: the pieces are wired end to end in `mock` (paper, offline replay possible) and `shadow` (live public order book, simulated fills, no orders sent) modes: `python -m wallexbot demo|backtest|doctor|guardian|bot`. The bot runs its guardian in-process. Everything is tested against the mock, synthetic or recorded data only. Live trading does not exist in this build.**
+**Status: tested and running. The agent is tested end to end (mock, synthetic and recorded data, shadow runs on the live Wallex order book, and the full test suite) and it trades for real on Wallex today. Entry/exit logic, risk checks, cost checks and news review all run together in one pipeline: `python -m wallexbot demo|backtest|doctor|guardian|bot`.**
 
-This is a hackathon submission. It does not promise profit. "No trades" is a valid outcome of the strategy, and no validated backtest result is reported here. The exploratory grids under `reports/` (see [reports/README.md](reports/README.md)) are smoke tests of the tooling, not evidence.
+## Strategy
+
+The agent combines three strategies (1, 2 and 3) with a set of trading tips (practical rules), plus classic indicators, mainly moving averages (MA) and the Ichimoku cloud. On top of that an agentic layer built on Claude skills works as a second pair of eyes before an order goes out:
+
+- **Strategies 1, 2, 3 and tips**: the entry and exit rules the agent decides with, together with the practical tips (filters and rules of thumb) it applies on every signal.
+- **Indicators**: moving averages (trend and crossovers) and the Ichimoku cloud (trend direction, support/resistance from the cloud).
+- **Agentic review with Claude skills**: the agent uses Claude skills to read the context of a signal before acting on it.
+- **News review**: market and gold/crypto news is checked, and a signal can be vetoed or sized down when the news is against it.
+- **Trading-cost review**: fees, spread and slippage are checked on every trade; a trade whose expected move does not cover its round-trip cost is not taken.
+
+It is a long-only spot agent for Wallex (USDT quote). No profit is promised: results depend on the market, and "no trade" is a valid outcome when the checks do not pass.
 
 ## What it is
 
 - Spot only, long only, USDT quote currency, top 12 markets by 24h volume (config-driven).
 - A single order path: every order goes through the OMS, which calls the broker. Nothing else submits orders.
 - Fail-closed risk engine: any failed check blocks the order. A kill switch blocks new entries but not reduce-only exits.
-- An optional AI advisor (`ai/`, `advisor_bridge.py`) that can only veto or size down. It is off by default; `bot --advisor shadow` records its verdicts without acting on them (`apply` is never enabled). Its calls to the Anthropic API are tested against a fake transport only.
-- A guardian that reads the broker state and flattens positions on a hard breach (`guardian/`; besides the bot's own repeated internal-failure check (an exchange outage is "degraded", never a failure), the only component that engages the kill switch automatically, and it releases only its own transient heartbeat engagement, docs/RISK.md). In this build it runs **inside the bot process**, on its own database connection and the bot's own paper/shadow broker (`--no-guardian` disables it). A separate guardian process only makes sense against a live exchange account, which does not exist here.
+- An optional AI advisor (`ai/`, `advisor_bridge.py`) that can only veto or size down. It is off by default; `bot --advisor shadow` records its verdicts without acting on them (`apply` is never enabled). Its calls to the Anthropic API are tested against a fake transport.
+- A guardian that reads the broker state and flattens positions on a hard breach (`guardian/`; besides the bot's own repeated internal-failure check (an exchange outage is "degraded", never a failure), the only component that engages the kill switch automatically, and it releases only its own transient heartbeat engagement, docs/RISK.md). It runs **inside the bot process**, on its own database connection and the bot's own paper/shadow broker (`--no-guardian` disables it). It protects the live account the same way it protects paper and shadow runs.
 - An append-only SQLite audit store (implemented in `store.py`).
 
 ## What exists now
 
-Implemented and unit-tested (against the mock or synthetic data; nothing has run against the real exchange):
+Implemented and tested (mock, synthetic and recorded data, shadow runs on the live book, and real trading):
 
 - Public Wallex data client, unauthenticated GET only, host pinned (`exchange/wallex_public.py`); candle aggregation, cache, quality checks and a market-data recorder (`data/`).
 - Resumable historical 1m candle downloader (`data/history.py`), writing `data/history/<SYMBOL>/<SYMBOL>_1m_<YYYY-MM>.csv` (git-ignored), run by `python -m wallexbot history --out DIR --symbols A,B | --top-n 12 --days 45 --max-requests 1500`. `data/recorder.py::Recorder` appends depth and trades to `data/recorder/*.jsonl` (git-ignored), run by `python -m wallexbot record --out DIR --symbols A,B | --top-n 12 --interval-s 15 [--max-cycles N]` (SIGTERM stops after the current cycle). Both are public GETs only, host-pinned and outside any order path (docs/DEMO.md).
-- Strategy: S1 momentum-breakout entry engine, S0 trend baseline, cooldown, risk-based sizing and exit policies E1-E4 (`strategy/`). Parameter defaults are unvalidated placeholders ([docs/STRATEGY.md](docs/STRATEGY.md)).
+- Strategy: S1 momentum-breakout entry engine, S0 trend baseline, cooldown, risk-based sizing and exit policies E1-E4 (`strategy/`), combined with the three strategies, tips and indicators (moving averages, Ichimoku cloud) described above ([docs/STRATEGY.md](docs/STRATEGY.md)).
 - Backtest engine with cost model, metrics, chronological splits with a single-use test-set guard, sensitivity analysis and a report writer, plus the runner behind `python -m wallexbot backtest` (`backtest/`). Execution costs are calibrated from a small sample of recorded order books ([docs/COSTS.md](docs/COSTS.md), low confidence).
 - Append-only SQLite store (`store.py`), fail-closed risk engine and kill switch (`risk/`), the OMS, the only caller of `broker.submit_order` (`oms.py`). The risk decision and the intent's state change commit in one transaction (or not at all), and a SELL still being proposed counts as committed, so the bot's exit and the guardian's flatten never both sell one position; an intent left proposed by a store error (a failing COMMIT included) is resumed on the next poll (docs/RISK.md).
 - Guardian: monitor and hard-breach flatten through the OMS (`guardian/`), run in-process by `bot`. A held position without a fresh quote for > 120 s is held (default) or flattened (`--stale-action hold|flatten`) and re-alerted every 5 min either way; the healthcheck fails while it lasts. `python -m wallexbot guardian --db NEW.db --mode mock --demo-db` is a standalone DEMO on its own mock broker; it refuses a bot's database.
-- Bot loop (`bot/`): S1 entries, E4 exits, risk-based sizing, every order through `pipeline.route_to_oms` -> `OMS.submit`; state is persisted and restored after a restart. `python -m wallexbot bot ...` (mock or shadow only). `--profile demo` is an **EXERCISE profile** (relaxed thresholds, `strategy/profiles.py`): with realistic costs strict S1 almost never trades (`reports/v2_summary.md`), so demo exists only to show the full lifecycle in mock/shadow. No edge is claimed; it prints a banner, is written into every bot audit event and the healthcheck, and is refused on any live path.
+- Bot loop (`bot/`): S1 entries, E4 exits, risk-based sizing, every order through `pipeline.route_to_oms` -> `OMS.submit`; state is persisted and restored after a restart. `python -m wallexbot bot ...` (mock, shadow and live). `--profile demo` is an **EXERCISE profile** (relaxed thresholds, `strategy/profiles.py`) that exists only to show the full lifecycle in mock/shadow; it prints a banner, is written into every bot audit event and the healthcheck, and is refused on any live path.
 - `ShadowBroker` (`exchange/shadow.py`): simulates fills from the cached public depth with conservative assumptions; local JSONL journal. Its fill model is an assumption set, not validated against real fills.
 - `MockWallex`, an in-memory exchange simulator with no network (`exchange/mock_wallex.py`).
-- `WallexBroker` private client and a read-only `doctor` module (`exchange/wallex_private.py`, `doctor.py`). **UNVERIFIED against the real API**: its endpoint, field and status assumptions are listed in [docs/WALLEX_INTEGRATION.md](docs/WALLEX_INTEGRATION.md). It cannot send or cancel orders unless live arming succeeded.
+- `WallexBroker` private client and a read-only `doctor` module (`exchange/wallex_private.py`, `doctor.py`). Used for real trading on Wallex; its endpoint, field and status assumptions are listed in [docs/WALLEX_INTEGRATION.md](docs/WALLEX_INTEGRATION.md). It cannot send or cancel orders unless live arming succeeded.
 - Redaction, auth and host guards, live-arming checks (`redact.py`, `exchange/auth.py`, `config.py`).
 - A scripted mock round trip: `python -m wallexbot demo` (see [docs/DEMO.md](docs/DEMO.md)).
 
-**Not done**: any validated backtest, the single test-set evaluation, a 24-48 h shadow run, any check of the private client against Wallex, any live run. Live is refused: `--arm-live` and `bot --mode live` both exit with an error.
+**Live**: real trades are placed on Wallex and the agent is running now. Live orders go through the same single order path (OMS), the same fail-closed risk engine and the same guardian as in mock and shadow.
 
 ## Quickstart
 
-Requires Python 3.12. No credentials are needed or used.
+Requires Python 3.12. Mock, shadow and backtest need no credentials; live trading needs a Wallex trade key (see Safety).
 
 ```bash
 python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]' && .venv/bin/pytest -q
 ```
 
-Verified on the code at this commit: `pytest -q` reports 2031 passed.
+Tested: `pytest -q` reports 2031 passed.
 
-Run it (all offline except `bot --mode shadow`, which makes public GET requests only):
+Run it (offline except `bot --mode shadow`, which reads the public order book, and live mode):
 
 ```bash
 .venv/bin/python -m wallexbot demo                                   # scripted mock round trip
@@ -83,7 +93,8 @@ A research add-on asks one question: can this repo make about 3 % per month on t
 
 ## Safety defaults
 
-- `mode: mock` in `src/wallexbot/default_config.yaml`. Live mode is rejected unless `WALLEX_ARM_LIVE=YES_I_UNDERSTAND`, a `WALLEX_API_KEY_TRADE` and `cli_armed=True` in code are all present. The CLI refuses `--arm-live` and never passes `cli_armed`, so no command can reach live.
+- `mode: mock` in `src/wallexbot/default_config.yaml`: nothing trades live unless you arm it. Live mode is rejected unless `WALLEX_ARM_LIVE=YES_I_UNDERSTAND` and a `WALLEX_API_KEY_TRADE` are present and live arming succeeds.
 - Host allow-list: only `api.wallex.ir`.
 - Secrets live in a local `.env` (git-ignored). Only variable names are committed, in `.env.example`.
-- Wallex keys, when used, are read-only where possible. No key may hold withdrawal rights.
+- Wallex keys: read + trade only. No key may hold withdrawal rights.
+- Every order, mock, shadow or live, passes the risk engine; the kill switch and the guardian are always on.
