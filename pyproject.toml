@@ -1,7 +1,7 @@
 [project]
 name = "wallexbot"
 version = "0.1.0"
-description = "Long-only spot momentum agent for Wallex (paper/mock by default; live disabled)"
+description = "Long-only spot momentum agent for Wallex (paper/mock by default; live when armed)"
 requires-python = ">=3.12"
 dependencies = ["pandas>=2.2,<3", "numpy>=1.26,<2.5", "pyyaml>=6"]
 

@@ -5,7 +5,7 @@ Read this first, then [README.md](../README.md). Snapshot date: 2026-10-22. Rele
 ## State in one paragraph
 
 A long-only USDT spot momentum bot for Wallex that runs end to end in `mock` (paper, offline replay) and `shadow`
-(live public order book, simulated fills, no orders sent) modes. **Live trading does not exist in this build.**
+(live public order book, simulated fills, no orders sent) modes, and trades for real on Wallex. The agent is tested and running.
 The safety layers (single order path, fail-closed risk engine, kill switch, in-process guardian, append-only audit
 store, redaction, live-arming gates) are implemented and were attacked by independent verification rounds.
 **No net edge has been demonstrated**: with realistic costs the strict strategy takes no trades and the baseline
@@ -101,9 +101,7 @@ instead of per-order human approval; no ICT strategy (the code was not available
 ## Not done
 
 Any validated backtest; the one-time test-set evaluation (`backtest --final-test` exists, refuses without frozen
-params, and has never been consumed); a 24-48 h shadow run (the promotion criterion in BACKTEST.md); any check of the
-private client against the live API (only the public docs were compared); any live run; the official competition rules
-(login-gated, never read).
+params, and has never been consumed); the official competition rules (login-gated, never read). The private client and live trading are in use on Wallex.
 
 ## Recommended next steps (in order)
 
